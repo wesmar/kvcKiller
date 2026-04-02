@@ -769,13 +769,35 @@ through UI Automation alone. No privileges beyond Administrator. No kernel drive
 manipulation. Just clicking buttons in a hidden window using Microsoft's own accessibility
 API.
 
-**smss, Known DLLs, and native API surface.** The Session Manager and the native API layer
-(`ntdll.dll`, `NtLoadDriver`, `RtlAdjustPrivilege`) expose capabilities that predate the
-Win32 security model. `NtLoadDriver` has no SCM involvement — a driver loaded through it
-appears in no service list, creates no audit event visible to standard tooling, and leaves
-nothing in the registry beyond a single temporary key that can be deleted immediately after
-load. The capability exists because the Session Manager needs to load drivers before the SCM
-starts. KvcKiller uses it for exactly that reason.
+**SMSS, BootExecute, and the pre-security boot window.**
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\BootExecute` is a `REG_MULTI_SZ`
+value that SMSS reads and executes during the native phase of Windows boot — before the Win32
+subsystem initialises, before the SCM starts, before any security service, EDR agent, or
+Defender component has loaded. Entries in `BootExecute` run as native subsystem applications
+(`/SUBSYSTEM:NATIVE`) with SYSTEM privileges in an environment where the entire security stack
+simply does not exist yet. The value was designed for `autochk` — the filesystem consistency
+check. Adding a second entry to it is a matter of a single registry write.
+
+**[KernelResearchKit](https://github.com/wesmar/KernelResearchKit)** explores this space.
+`BootBypass(FastReboot)` is a native subsystem application deployed via `BootExecute` that
+patches Driver Signature Enforcement by manipulating kernel code integrity callbacks — before
+Windows Defender, before any EDR agent, before the Win32 subsystem itself. The FastReboot
+variant goes further: it patches the SYSTEM hive directly on disk using a Chunked Rolling
+Scan algorithm, disables HVCI, and issues `NtShutdownSystem` — all within the SMSS phase,
+leaving no service artifacts and requiring no Win32 infrastructure whatsoever.
+
+The offset of the DSE control flag (`ci.dll!g_CiOptions`) in any given Windows build is
+resolved dynamically from Microsoft's own symbol server
+(`https://msdl.microsoft.com/download/symbols`). Microsoft publishes full PDB files for every
+Windows component — kernel, drivers, system DLLs — to support crash dump analysis, WinDbg,
+and Visual Studio debugging. Those PDB files contain the precise byte offsets of every
+internal structure and global variable in the kernel, for every build ever shipped. Removing
+that publication would break Windows Error Reporting, the entire Windows debugging ecosystem,
+and enterprise crash analysis workflows. So Microsoft continues to publish the exact
+coordinates of its own security-critical kernel internals, updated with every Patch Tuesday.
+KernelResearchKit caches each resolved offset in a 32-byte `.mpdb` file, handles PDB version
+rotation transparently, and updates automatically when a new kernel is installed. The symbol
+server is effectively a changelog of exploitable offsets, maintained and hosted by Microsoft.
 
 The pattern is consistent from UEFI variable manipulation through bootloader trust chains,
 down through native NT APIs, Win32 backup privileges, and UI Automation accessibility hooks.
