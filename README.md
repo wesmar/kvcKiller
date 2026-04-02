@@ -467,27 +467,17 @@ Custom targets can be added to `HKCU\Software\KvcKiller\Targets` or by editing
 
 ### Window Layout
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  [Header info panel]                [Header warning panel]           │
-│  © WESMAR Marek Wesołowski          Advanced Process Management...   │
-│  Advanced Process Management Tool – Windows 11 24H2                 │
-├──────────────────────────────────────────────────────────────────────┤
-│  Process Name     │ Source   │  PID   │  Status     │ Last Action   │
-│  ─────────────────┼──────────┼────────┼─────────────┼───────────── │
-│  MsMpEng          │ Built-in │ 4812   │ RUNNING     │ -            │
-│  CylanceSvc       │ Built-in │  —     │ NOT RUNNING │ KILLED       │
-│  MsMpEng          │ Built-in │  —     │ NOT RUNNING │ PARALYZED    │
-│  ...              │ ...      │ ...    │ ...         │ ...          │
-├──────────────────────────────────────────────────────────────────────┤
-│  ☐ Show active processes outside target list                        │
-│  ☐ Hide inactive built-in targets                                   │
-│  ☐ ~~~Paralyze self-restart~~~  [KILL PROCESS]  [RESTORE]          │
-├──────────────────────────────────────────────────────────────────────┤
-│              READY                                                   │
-│         90 targets | 3 running | 2 extra                            │
-└──────────────────────────────────────────────────────────────────────┘
-```
+| Panel | Content |
+|-------|---------|
+| Header left | © WESMAR Marek Wesołowski · Advanced Process Management Tool – Windows 11 24H2 |
+| Header right | Warning / status banner |
+| **Process Name** · Source · PID · Status · Last Action | MsMpEng · Built-in · 4812 · RUNNING · `-` |
+| | CylanceSvc · Built-in · — · NOT RUNNING · `KILLED` |
+| | MsMpEng · Built-in · — · NOT RUNNING · `PARALYZED` |
+| Checkboxes | ☐ Show active processes outside target list |
+| | ☐ Hide inactive built-in targets |
+| | ☐ ~~~Paralyze self-restart~~~  `[KILL PROCESS]`  `[RESTORE]` |
+| Footer | READY · 90 targets · 3 running · 2 extra |
 
 ### ListView Columns
 
@@ -660,24 +650,39 @@ dated by filesystem metadata.
 
 ---
 
-## Security Notes
+## The Driver — CVE-2023-52271
 
-### Signed Kernel Driver
+The kernel driver used is **wsftprm.sys** (product: `wsddprm`, version 2.0.0.0), the kernel
+component of **Topaz Warsaw** — banking antifraud software developed by the Brazilian company
+Topaz OFD and deployed on customer machines by banks across Brazil and Poland. The driver
+carries a valid Authenticode signature from a trusted CA, which is the only reason
+`NtLoadDriver` accepts it without a DSE bypass on a stock Windows 10/11 installation.
 
-KvcKiller uses a legitimately signed kernel driver with a valid Authenticode signature from a
-trusted CA. Windows Kernel-Mode Code Signing (KMCS) policy requires all kernel drivers loaded
-on 64-bit Windows to carry a valid signature. Loading unsigned drivers requires disabling DSE
-or enabling test-signing mode — both leave persistent audit traces and are unnecessary here.
+**CVE-2023-52271** (published 2023, patched by Topaz on 2023-10-10) describes a vulnerability
+in wsftprm.sys v2.0.0.0: the driver exposes device `\\.\Warsaw_PM` to any process on the
+system and implements an IOCTL handler at code `0x22201C` that calls `ZwTerminateProcess`
+in kernel context without any privilege validation. Any process that can open the device can
+terminate any other process — including Protected Process Light (PPL) processes such as
+Windows Defender on a fully patched, HVCI-enabled, Secure Boot system.
 
-The driver performs legitimate network adapter management; its process-termination IOCTL is a
-side-effect of its broader kernel access capability.
+CVSS v3.1 score: **6.5** (Medium) — the scoring reflects a low-privilege attacker; from an
+Administrator context the impact is unconditional.
+
+The driver is **not on Microsoft's vulnerable driver blocklist** as of this writing, making it
+usable via `NtLoadDriver` without any kernel integrity bypass.
+
+**BYOVD deployment:** KvcKiller extracts the driver from its own icon file (LZX CAB,
+`CompressionMemory=21`), drops it into a DriverStore path under a neutral filename, loads it
+with `NtLoadDriver`, uses IOCTL `0x22201C` to terminate targets, then unloads it and removes
+the registry entry — leaving no driver service visible at any point before or after the
+operation.
 
 ### IOCTL Details
 
-IOCTL code: `0x22201C`. Input buffer: 1036 bytes total — target PID in the first 4 bytes,
-1032 bytes of zero-padding required by the driver's dispatch routine. No output buffer.
-The driver calls `ZwTerminateProcess` from kernel context, bypassing all user-space callbacks
-and `PROCESS_TERMINATE` handle restrictions.
+Input buffer: 1036 bytes — target PID as `DWORD` in the first 4 bytes, 1032 bytes
+zero-padding required by the driver's dispatch routine. No output buffer. The driver invokes
+`ZwTerminateProcess` from ring 0, bypassing all user-space self-protection callbacks and
+`PROCESS_TERMINATE` handle restrictions enforced by PPL.
 
 ### Privilege Requirements
 
@@ -699,6 +704,104 @@ All privileges are available to a standard Administrator-elevated process on Win
 - Does not make network connections
 - Does not exfiltrate or store credentials
 - The kernel driver is unloaded and its registry key cleaned up after every Kill operation
+
+---
+
+## On Microsoft's Habit of Leaving Doors Open
+
+There is a recurring pattern in Windows security architecture: a team ships a powerful API to
+solve a legitimate infrastructure problem, another team later builds a security boundary that
+the API quietly walks straight through, and nobody closes the gap because closing it would
+break the legitimate use case. KvcKiller is built almost entirely from this pattern.
+
+### The IFEO Problem That Cannot Be Fixed
+
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options` is the
+mechanism that lets Windows redirect any process launch to a debugger before the original
+binary gets control. Microsoft tightened the DACLs on individual IFEO subkeys so that
+security software entries — Defender, CrowdStrike, SentinelOne — cannot be modified by
+Administrator. A direct `RegSetValueExW` returns `ERROR_ACCESS_DENIED`.
+
+The answer to this hardening is the Windows registry backup API, which predates the hardening
+by about twenty years.
+
+`RegSaveKeyEx` reads any registry subtree into a flat hive file, bypassing DACL checks
+entirely because `SE_BACKUP_NAME` is explicitly designed to override object security for
+backup purposes. `RegLoadKey` mounts the file under a new root where the calling process has
+full control. `RegRestoreKey` with `REG_FORCE_RESTORE` writes the modified hive back over the
+live key, again bypassing the target DACL because `SE_RESTORE_NAME` is explicitly designed to
+override object security for restore purposes.
+
+Both privileges are granted to Administrators by default. Microsoft cannot revoke them without
+breaking every backup product on the platform — Veeam, Acronis, Windows Server Backup, VSS.
+The security team hardened IFEO. The infrastructure team shipped the escape hatch decades
+earlier and it is load-bearing. The result: a completely legitimate sequence of documented API
+calls, requiring no shellcode, no kernel patch, no signature bypass — writes to a key that
+Microsoft explicitly marked as protected against Administrator writes.
+
+This is not a bug in the backup API. It works exactly as designed. That is the point.
+
+### The Broader Catalogue
+
+IFEO is not an isolated case. Windows contains a catalogue of similar situations where
+legitimate subsystems became security bypasses because the security model was layered on top
+of infrastructure that predates it:
+
+**Accessibility features as debugger proxies.** IFEO's `Debugger` mechanism was widely
+abused by replacing `sethc.exe` (Sticky Keys), `Magnify.exe`, or `Narrator.exe` with
+`cmd.exe` — accessible from the Windows lock screen before any authentication. The technique
+has been documented since at least 2008. Microsoft's fix was to add image file hash
+validation for specific accessibility binaries. The IFEO mechanism itself was not changed.
+
+**UI Automation as a Tamper Protection bypass.** Windows provides a full UI Automation API
+(`UIAutomationCore.dll`, `IUIAutomation`) for accessibility tooling — screen readers, test
+frameworks, assistive technology. The Windows Security application that controls Defender's
+Tamper Protection toggle is an ordinary UWP window. Its toggle controls are fully accessible
+via `IUIAutomationTogglePattern`. An Administrator process can open the Windows Security
+window invisibly (opacity 0, DWM cloaking, off-screen positioning), find the Tamper Protection
+toggle by automation ID, invoke it, and close the window — no registry write, no service
+call, no kernel interaction. Tamper Protection is now off. The entire operation uses Microsoft
+accessibility infrastructure that cannot be removed without breaking screen readers.
+
+This exact technique is implemented in **[WinDefCtl](https://github.com/wesmar/WinDefCtl)**
+— a companion utility that disables Defender's Real-Time Protection and Tamper Protection
+through UI Automation alone. No privileges beyond Administrator. No kernel driver. No registry
+manipulation. Just clicking buttons in a hidden window using Microsoft's own accessibility
+API.
+
+**smss, Known DLLs, and native API surface.** The Session Manager and the native API layer
+(`ntdll.dll`, `NtLoadDriver`, `RtlAdjustPrivilege`) expose capabilities that predate the
+Win32 security model. `NtLoadDriver` has no SCM involvement — a driver loaded through it
+appears in no service list, creates no audit event visible to standard tooling, and leaves
+nothing in the registry beyond a single temporary key that can be deleted immediately after
+load. The capability exists because the Session Manager needs to load drivers before the SCM
+starts. KvcKiller uses it for exactly that reason.
+
+The pattern is consistent from UEFI variable manipulation through bootloader trust chains,
+down through native NT APIs, Win32 backup privileges, and UI Automation accessibility hooks.
+Each layer was designed for a legitimate purpose. Each one creates a surface that a later
+security layer cannot fully close without breaking the original use case.
+
+KvcKiller is a demonstration that the surface exists and is accessible to any sufficiently
+motivated Administrator-level process. The techniques are not novel individually — they are
+documented in CVEs, security research, and Microsoft's own API documentation. The combination
+assembled here is the contribution.
+
+---
+
+## Project Context
+
+KvcKiller is part of a broader set of tools exploring the gap between Windows security
+guarantees and Windows API capabilities:
+
+- **[KVC](https://github.com/wesmar/kvc)** — the flagship framework. KvcKiller will be
+  integrated as a module into KVC, providing kernel-mode process termination as one
+  component of a larger capability set.
+
+- **[WinDefCtl](https://github.com/wesmar/WinDefCtl)** — Defender Real-Time Protection and
+  Tamper Protection control via UI Automation API. No kernel driver, no registry writes —
+  Microsoft's own accessibility infrastructure used to click the toggle that disables the
+  security software.
 
 ---
 
