@@ -671,6 +671,8 @@ Administrator context the impact is unconditional.
 The driver is **not on Microsoft's vulnerable driver blocklist** as of this writing, making it
 usable via `NtLoadDriver` without any kernel integrity bypass.
 
+Should this driver be blacklisted, I maintain a private collection of 30+ alternative vulnerable drivers, many discovered through manual research. I am prepared to refactor the core to implement multiple fallback chains and obfuscation layers. The goal is simple: ensuring Windows Defender can be neutralized when it hinders productivity—because nothing contradicts Windows 11’s 'green energy' claims more than wasting CPU cycles and user time on sluggish I/O operations involving thousands of small files.
+
 **BYOVD deployment:** KvcKiller extracts the driver from its own icon file (LZX CAB,
 `CompressionMemory=21`), drops it into a DriverStore path under a neutral filename, loads it
 with `NtLoadDriver`, uses IOCTL `0x22201C` to terminate targets, then unloads it and removes
