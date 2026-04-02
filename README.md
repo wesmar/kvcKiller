@@ -469,7 +469,7 @@ Custom targets can be added to `HKCU\Software\KvcKiller\Targets` or by editing
 
 | Panel | Content |
 |-------|---------|
-| Header left | © WESMAR Marek Wesołowski · Advanced Process Management Tool – Windows 11 24H2 |
+| Header left | © WESMAR Marek Wesołowski · Advanced Process Management Tool – Windows 11 25H2 |
 | Header right | Warning / status banner |
 | **Process Name** · Source · PID · Status · Last Action | MsMpEng · Built-in · 4812 · RUNNING · `-` |
 | | CylanceSvc · Built-in · — · NOT RUNNING · `KILLED` |
