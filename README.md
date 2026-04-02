@@ -654,7 +654,7 @@ dated by filesystem metadata.
 
 The kernel driver used is **wsftprm.sys** (product: `wsddprm`, version 2.0.0.0), the kernel
 component of **Topaz Warsaw** — banking antifraud software developed by the Brazilian company
-Topaz OFD and deployed on customer machines by banks across Brazil and Poland. The driver
+Topaz OFD and deployed on customer machines by banks across Brazil. The driver
 carries a valid Authenticode signature from a trusted CA, which is the only reason
 `NtLoadDriver` accepts it without a DSE bypass on a stock Windows 10/11 installation.
 
