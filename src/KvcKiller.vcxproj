@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{a1b2c3d4-e5f6-7890-abcd-ef1234567890}</ProjectGuid>
+    <RootNamespace>KvcKiller</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <OutDir>$(ProjectDir)..\bin\</OutDir>
+    <IntDir>$(ProjectDir)..\obj\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp23</LanguageStandard>
+      <Optimization>MinSpace</Optimization>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalOptions>/source-charset:utf-8 /execution-charset:utf-8 /validate-charset %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ResourceCompile>
+      <AdditionalOptions>/c65001 %(AdditionalOptions)</AdditionalOptions>
+    </ResourceCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableUAC>true</EnableUAC>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+      <UACUIAccess>false</UACUIAccess>
+      <AdditionalOptions>/BREPRO %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <Manifest>
+      <AdditionalManifestFiles>$(ProjectDir)KvcKiller.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+      <EmbedManifest>true</EmbedManifest>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="CLIHandler.cpp" />
+    <ClCompile Include="GlobalData.cpp" />
+    <ClCompile Include="ListViewManager.cpp" />
+    <ClCompile Include="ProcessOperations.cpp" />
+    <ClCompile Include="UIHelpers.cpp" />
+    <ClCompile Include="Utils.cpp" />
+    <ClCompile Include="DriverController.cpp" />
+    <ClCompile Include="ProcessKiller.cpp" />
+    <ClCompile Include="ConfigReader.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="CLIHandler.h" />
+    <ClInclude Include="GlobalData.h" />
+    <ClInclude Include="ListViewManager.h" />
+    <ClInclude Include="ProcessOperations.h" />
+    <ClInclude Include="UIHelpers.h" />
+    <ClInclude Include="Utils.h" />
+    <ClInclude Include="DriverController.h" />
+    <ClInclude Include="ProcessKiller.h" />
+    <ClInclude Include="ConfigReader.h" />
+    <ClInclude Include="Resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="KvcKiller.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="KvcKiller.manifest" />
+    <None Include="KvcKiller.ini" />
+    <None Include="kill.ini" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

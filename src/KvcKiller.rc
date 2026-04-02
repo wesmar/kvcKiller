@@ -1,0 +1,119 @@
+#pragma code_page(65001)
+
+// Microsoft Visual C++ generated resource script.
+//
+#include "Resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "winres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_POLISH, SUBLANG_POLISH_POLAND
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Icon
+//
+
+// Icon with lowest ID value placed first to ensure application icon
+// remains consistent on all systems.
+MAIN_ICON            ICON                    "..\\ICON\\kvc.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041504B0"
+        BEGIN
+            VALUE "CompanyName", "wesmar (Marek Wesołowski)"
+            VALUE "FileDescription", "KvcKiller - Advanced Process Management Tool"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "KvcKiller.exe"
+            VALUE "LegalCopyright", "Marek Wesołowski © 2026"
+            VALUE "OriginalFilename", "KvcKiller.exe"
+            VALUE "ProductName", "KvcKiller"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0415, 1200
+    END
+END
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE               "KvcKiller"
+    IDS_WINDOW_TITLE            "KvcKiller - WESMAR Marek Wesołowski"
+    IDS_AUTHOR_LINE             "© WESMAR Marek Wesołowski"
+    IDS_APP_SUBTITLE            "Advanced Process Management Tool"
+    IDS_APP_WARNING             "Advanced Process Management is a powerful utility designed for absolute control over system execution. This tool grants the authority to terminate any active process, including critical system tasks, without restriction. Please exercise extreme caution, as force-closing essential services may lead to immediate system instability or data loss. Use the process list to select a target and apply management actions with precision."
+
+    IDS_COL_PROCESS_NAME        "Process Name"
+    IDS_COL_SOURCE              "Source"
+    IDS_COL_PID                 "PID"
+    IDS_COL_STATUS              "Status"
+    IDS_COL_LAST_ACTION         "Last Action"
+
+    IDS_BTN_KILL                "KILL PROCESS"
+    IDS_BTN_RESTORE             "RESTORE"
+    IDS_CHK_SHOW_EXTRA          "Show active processes outside target list"
+    IDS_CHK_HIDE_INACTIVE       "Hide inactive built-in targets"
+    IDS_CHK_PARALYZE            "Paralyze self-restart"
+
+    IDS_STATUS_READY            "READY"
+    IDS_STATUS_KILLING          "KILLING SELECTED..."
+    IDS_STATUS_RESTORING_SVC    "RESTORING SERVICES..."
+    IDS_STATUS_KILL_ALL_OK      "KILL COMPLETE - ALL SUCCESS"
+    IDS_STATUS_KILL_PARTIAL     "KILL COMPLETE - PARTIAL SUCCESS"
+    IDS_STATUS_KILL_FAILED      "KILL FAILED"
+    IDS_STATUS_RESTORE_OK       "RESTORE COMPLETE"
+    IDS_STATUS_RESTORE_PARTIAL  "RESTORE PARTIAL"
+    IDS_STATUS_RESTORE_FAILED   "RESTORE FAILED"
+    IDS_STATUS_ALREADY_DEAD     "ALREADY DEAD (NOT RUNNING)"
+    IDS_STATUS_ALREADY_RUNNING  "ALREADY RUNNING"
+    IDS_STATUS_DRIVER_ERR       "ERROR: Driver not loaded!"
+
+    IDS_ERR_CAPTION             "Error"
+    IDS_ERR_NEED_ADMIN          "Please run as Administrator!"
+    IDS_ERR_WINDOW_CLASS        "Window class registration failed!"
+    IDS_ERR_WINDOW_CREATE       "Window creation failed!"
+END
+
+IDR_DEFAULT_TARGETS      RCDATA                  "KvcKiller.ini"
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+#ifndef APSTUDIO_INVOKED
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+#define _APS_NEXT_RESOURCE_VALUE        171
+#define _APS_NEXT_COMMAND_VALUE         40001
+#define _APS_NEXT_CONTROL_VALUE         1001
+#define _APS_NEXT_SYMED_VALUE           101
+#endif    // not APSTUDIO_INVOKED
