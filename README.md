@@ -1,5 +1,18 @@
 <div align="center">
 
+# ⚠️ CRITICAL UPDATE: 10.04.2026 ⚠️
+
+## **Program was previously non-functional — embedded resource was missing from the RC file.**
+
+### The kernel driver binary is compiled into the executable as an LZX-compressed Cabinet
+### appended to the application icon resource. The `.rc` file did not include this resource,
+### causing driver extraction to fail silently. The tool could not terminate any processes.
+
+### **This is now fixed.** The resource is properly embedded and the tool works correctly
+### on **all Windows 10 / 11 environments, including build 26H1.**
+
+---
+
 # KvcKiller
 
 **Advanced Process Management Tool for Windows x64**
