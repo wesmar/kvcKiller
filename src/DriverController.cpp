@@ -12,6 +12,7 @@
 //   5. Cleanup: stop, unregister, and scrub registry entries.
 
 #include "DriverController.h"
+#include "Resource.h"
 #include <winsvc.h>
 #include <winternl.h>
 #include <iostream>
@@ -218,42 +219,40 @@ bool DriverController::ImpersonateTrustedInstaller() {
     }
     CloseHandle(hProcess);
 
-    // Step 2: ensure TrustedInstaller service is running.
+    // Step 2: Ensure TrustedInstaller service is running and get its PID.
+    DWORD tiPid = 0;
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (hSCM) {
         SC_HANDLE hSvc = OpenServiceW(hSCM, L"TrustedInstaller",
                                       SERVICE_START | SERVICE_QUERY_STATUS);
         if (hSvc) {
-            SERVICE_STATUS_PROCESS ssp; DWORD needed;
+            SERVICE_STATUS_PROCESS ssp;
+            DWORD needed;
             if (QueryServiceStatusEx(hSvc, SC_STATUS_PROCESS_INFO,
                                      (LPBYTE)&ssp, sizeof(ssp), &needed)) {
-                if (ssp.dwCurrentState == SERVICE_STOPPED) StartServiceW(hSvc, 0, NULL);
+                if (ssp.dwCurrentState == SERVICE_STOPPED || ssp.dwCurrentState == SERVICE_STOP_PENDING) {
+                    StartServiceW(hSvc, 0, NULL);
+                }
+            }
+
+            // Wait for the service to reach the running state
+            for (int i = 0; i < 5000; ++i) {
+                if (QueryServiceStatusEx(hSvc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed)) {
+                    if (ssp.dwCurrentState == SERVICE_RUNNING && ssp.dwProcessId != 0) {
+                        tiPid = ssp.dwProcessId;
+                        break;
+                    }
+                }
+                SwitchToThread();
             }
             CloseServiceHandle(hSvc);
         }
         CloseServiceHandle(hSCM);
     }
 
-    // Give TrustedInstaller.exe time to fully start before we snapshot it.
-    Sleep(1000);
-
-    // Step 3: find the TrustedInstaller process and impersonate its token.
-    DWORD tiPid = 0;
-    hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe = { sizeof(pe) };
-        if (Process32FirstW(hSnap, &pe)) {
-            do {
-                if (_wcsicmp(pe.szExeFile, L"TrustedInstaller.exe") == 0) {
-                    tiPid = pe.th32ProcessID;
-                    break;
-                }
-            } while (Process32NextW(hSnap, &pe));
-        }
-        CloseHandle(hSnap);
-    }
     if (tiPid == 0) return false;
 
+    // Impersonate the TrustedInstaller token
     hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, tiPid);
     if (!hProcess) return false;
     bool success = false;
@@ -298,133 +297,124 @@ std::wstring DriverController::GetDriverPath() {
     return FindDriverStorePath() + L"\\netadapter.sys";
 }
 
-// Performs the full driver registration sequence:
-//   1. Pre-create the DriverStore directory as Admin (before impersonation,
-//      because std::filesystem doesn't handle impersonated tokens reliably).
-//   2. Read kvc.ico from disk, find the embedded MSCF (Cabinet) signature,
-//      and set up an in-memory FDI read context.
-//   3. Elevate to TrustedInstaller and run FDICopy to extract netadapter.sys
-//      directly into the DriverStore path.
-//   4. Write the minimal SCM registry key under HKLM\...\Services\<name>.
-//
-// On any failure after the file is extracted, it is removed (rollback).
-// On any failure after the registry key is created, that is also removed.
-bool DriverController::RegisterDriver(const std::wstring& unused) {
-    std::wstring driverPath = GetDriverPath();
-    if (driverPath.empty()) return false;
+// Extracts the driver binary embedded in the IDR_DRIVER_PAYLOAD RCDATA resource
+// (kvc.ico with a Cabinet appended after the ICO data) and writes it to targetPath.
+// Uses FindResource/LoadResource so the payload lives in the .rsrc PE section —
+// no post-build appending step needed.
+// Returns true on success.
+bool DriverController::ExtractDriverFromIcon(const std::wstring& targetPath) {
+    // Load the RCDATA resource that contains kvc.ico with the CAB payload.
+    HRSRC hRes = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_DRIVER_PAYLOAD), RT_RCDATA);
+    if (!hRes) return false;
 
-    // Pre-create directories while we are Admin — impersonated token may not
-    // have permission to call fs::create_directories.
+    HGLOBAL hData = LoadResource(NULL, hRes);
+    if (!hData) return false;
+
+    DWORD resSize = SizeofResource(NULL, hRes);
+    if (resSize == 0) return false;
+
+    const BYTE* pRes = static_cast<const BYTE*>(LockResource(hData));
+    if (!pRes) return false;
+
+    // Find the MSCF (Cabinet) signature inside the resource blob.
+    // It sits after the ICO header data inside kvc.ico.
+    const BYTE cabSig[] = { 'M', 'S', 'C', 'F' };
+    const BYTE* pCab = std::search(pRes, pRes + resSize, cabSig, cabSig + 4);
+    if (pCab == pRes + resSize) return false;
+
+    if (!ImpersonateTrustedInstaller()) return false;
+
+    // Create the DriverStore directory under TrustedInstaller context —
+    // only TI has write rights to FileRepository subdirectories.
     std::error_code ec;
-    fs::path parentPath = fs::path(driverPath).parent_path();
+    fs::path parentPath = fs::path(targetPath).parent_path();
     if (!fs::exists(parentPath)) {
         fs::create_directories(parentPath, ec);
     }
 
-    bool registryCreated = false;
-    bool driverExtracted = false;
-
-    // Resolve kvc.ico relative to the executable (../ICON/kvc.ico).
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    fs::path iconPath = fs::path(exePath).parent_path() / ".." / "ICON" / "kvc.ico";
-
-    // Normalize to an absolute path (removes ".." segments).
-    wchar_t fullPath[MAX_PATH];
-    if (GetFullPathNameW(iconPath.c_str(), MAX_PATH, fullPath, nullptr) != 0) {
-        iconPath = fs::path(fullPath);
-    }
-
-    std::ifstream iconFile(iconPath, std::ios::binary);
-    if (!iconFile) return false;
-
-    std::vector<BYTE> iconData((std::istreambuf_iterator<char>(iconFile)),
-                                std::istreambuf_iterator<char>());
-    iconFile.close();
-
-    // Locate the Cabinet signature (MSCF = 0x4D534346) appended after the ICO data.
-    const BYTE sig[] = { 'M', 'S', 'C', 'F' };
-    auto it = std::search(iconData.begin(), iconData.end(), sig, sig + 4);
-    if (it == iconData.end()) return false;
-
-    size_t offset = std::distance(iconData.begin(), it);
-
-    // Pack a MemoryReadContext into g_extractedData so fdi_read/fdi_seek can
-    // access it via g_extractedData.data().  The struct is stored by value
-    // (bitwise copy) — the pointer inside it refers to iconData which stays
-    // alive through FDICopy.
-    MemoryReadContext mctx = { iconData.data() + offset, iconData.size() - offset, 0 };
+    MemoryReadContext mctx = { pCab, resSize - static_cast<size_t>(pCab - pRes), 0 };
     g_extractedData.assign((BYTE*)&mctx, (BYTE*)&mctx + sizeof(mctx));
 
-    // Elevate to TrustedInstaller before touching the DriverStore path.
-    if (!ImpersonateTrustedInstaller()) return false;
-
-    g_extractionPath = driverPath;
-
+    g_extractionPath = targetPath;
     ERF erf;
+    BOOL res = FALSE;
     HFDI hfdi = FDICreate(fdi_alloc, fdi_free, fdi_open, fdi_read, fdi_write,
-                           fdi_close, fdi_seek, cpuUNKNOWN, &erf);
-    if (!hfdi) {
-        RevertToSelf();
-        return false;
-    }
-    // "a" and "" are dummy cabinet name / path — fdi_open ignores them.
-    BOOL res = FDICopy(hfdi, (char*)"a", (char*)"", 0, fdi_notify, NULL, NULL);
-    FDIDestroy(hfdi);
-
-    RevertToSelf(); // Drop TrustedInstaller impersonation regardless of outcome.
-
-    if (!res) return false;
-    driverExtracted = true;
-
-    // Build the service registry key path.
-    HKEY hKey;
-    std::wstring regPath = L"System\\CurrentControlSet\\Services\\" + std::wstring(SERVICE_NAME);
-
-    // Atomically clean up any leftover registry key from a previous failed
-    // install before creating a fresh one.
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, regPath.c_str());
-
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, regPath.c_str(), 0, NULL,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-        if (driverExtracted) { std::error_code ec; fs::remove(fs::path(driverPath), ec); }
-        return false;
-    }
-    registryCreated = true;
-
-    // Minimal service key values required by NtLoadDriver.
-    DWORD type         = 1; // SERVICE_KERNEL_DRIVER
-    DWORD errorControl = 0; // SERVICE_ERROR_IGNORE
-    std::wstring ntPath = L"\\??\\" + driverPath; // NT namespace path
-
-    // Each RegSetValueEx failure triggers a full rollback (key + file).
-    if (RegSetValueExW(hKey, L"Type", 0, REG_DWORD,
-                       (const BYTE*)&type, sizeof(DWORD)) != ERROR_SUCCESS) {
-        RegCloseKey(hKey);
-        if (registryCreated) RegDeleteTreeW(HKEY_LOCAL_MACHINE, regPath.c_str());
-        if (driverExtracted) { std::error_code ec; fs::remove(fs::path(driverPath), ec); }
-        return false;
+                          fdi_close, fdi_seek, cpuUNKNOWN, &erf);
+    if (hfdi) {
+        res = FDICopy(hfdi, (char*)"a", (char*)"", 0, fdi_notify, NULL, NULL);
+        FDIDestroy(hfdi);
     }
 
-    if (RegSetValueExW(hKey, L"ErrorControl", 0, REG_DWORD,
-                       (const BYTE*)&errorControl, sizeof(DWORD)) != ERROR_SUCCESS) {
-        RegCloseKey(hKey);
-        if (registryCreated) RegDeleteTreeW(HKEY_LOCAL_MACHINE, regPath.c_str());
-        if (driverExtracted) { std::error_code ec; fs::remove(fs::path(driverPath), ec); }
+    RevertToSelf();
+    return res != FALSE;
+}
+
+// Performs the full driver registration sequence.
+bool DriverController::RegisterDriver(const std::wstring& driverPathIn) {
+    std::wstring driverPath = driverPathIn.empty() ? GetDriverPath() : driverPathIn;
+    if (driverPath.empty()) return false;
+
+    // Only extract if the payload is not already in place.
+    // On systems where the DriverStore directory does not exist (clean VMs,
+    // minimal installs) ImpersonateTrustedInstaller() may fail; if the .sys
+    // was placed there by other means (manual copy, previous run) we can skip
+    // extraction and proceed directly to service registration.
+    bool sysExists = fs::exists(driverPath);
+    if (!sysExists) {
+        if (!ExtractDriverFromIcon(driverPath)) {
+            return false;
+        }
+    } else {
+        // Best-effort refresh: ignore failure (file in use, TI unavailable, etc.)
+        ExtractDriverFromIcon(driverPath);
+    }
+
+    SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE | SC_MANAGER_CONNECT);
+    if (!hSCM) return false;
+
+    // Try to stop and delete any leftover service just in case.
+    SC_HANDLE hOldService = OpenServiceW(hSCM, SERVICE_NAME, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+    if (hOldService) {
+        SERVICE_STATUS status;
+        ControlService(hOldService, SERVICE_CONTROL_STOP, &status);
+
+        // Wait until the service actually reaches SERVICE_STOPPED before deleting.
+        SERVICE_STATUS_PROCESS ssp;
+        DWORD needed;
+        while (QueryServiceStatusEx(hOldService, SC_STATUS_PROCESS_INFO,
+                                    (LPBYTE)&ssp, sizeof(ssp), &needed)) {
+            if (ssp.dwCurrentState == SERVICE_STOPPED) break;
+            SwitchToThread();
+        }
+
+        DeleteService(hOldService);
+        CloseServiceHandle(hOldService);
+    }
+
+    SC_HANDLE hService = CreateServiceW(
+        hSCM,
+        SERVICE_NAME,
+        SERVICE_NAME, // Display name
+        SERVICE_ALL_ACCESS,
+        SERVICE_KERNEL_DRIVER,
+        SERVICE_DEMAND_START,
+        SERVICE_ERROR_IGNORE,
+        driverPath.c_str(),
+        NULL, NULL, NULL, NULL, NULL
+    );
+
+    if (!hService) {
+        if (GetLastError() == ERROR_SERVICE_EXISTS) {
+            CloseServiceHandle(hSCM);
+            return true;
+        }
+        CloseServiceHandle(hSCM);
         return false;
     }
 
-    if (RegSetValueExW(hKey, L"ImagePath", 0, REG_EXPAND_SZ,
-                       (const BYTE*)ntPath.c_str(),
-                       (DWORD)((ntPath.length() + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) {
-        RegCloseKey(hKey);
-        if (registryCreated) RegDeleteTreeW(HKEY_LOCAL_MACHINE, regPath.c_str());
-        if (driverExtracted) { std::error_code ec; fs::remove(fs::path(driverPath), ec); }
-        return false;
-    }
-
-    RegCloseKey(hKey);
-    return true; // Registry is prepped and the .sys file is in place.
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSCM);
+    return true;
 }
 
 // Returns true if the driver device node is open and responds to our IOCTL.
@@ -531,9 +521,7 @@ bool DriverController::StopDriver() {
 // file from the DriverStore (caller's responsibility if needed).
 bool DriverController::UnregisterDriver() {
     StopDriver();
-    std::wstring regPath =
-        L"System\\CurrentControlSet\\Services\\" + std::wstring(SERVICE_NAME);
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, regPath.c_str());
+    CleanupDriverRegistry();
     return true;
 }
 
@@ -554,15 +542,20 @@ void DriverController::CloseDriverHandle() {
     }
 }
 
-// Removes the service registry key from CurrentControlSet and both ControlSet00x
-// fallback entries.  Called after operations complete to minimize leftover traces.
-// Best-effort: individual delete failures are silently ignored.
+// Unloads the driver from the kernel and removes its registry key from
+// CurrentControlSet and both ControlSet00x fallback entries.
+// Proper teardown sequence: NtUnloadDriver first, then registry wipe.
+// Best-effort: individual failures are silently ignored.
 void DriverController::CleanupDriverRegistry() {
+    // Always stop before deleting — never leave the service marked-for-deletion
+    // while the driver is still loaded in the kernel.
+    StopDriver();
+
     std::wstring regPath =
         L"System\\CurrentControlSet\\Services\\" + std::wstring(SERVICE_NAME);
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, regPath.c_str());
 
-    // Also sweep alternate control sets that Windows may have mirrored into.
+    // Sweep alternate control sets that Windows may have mirrored into.
     std::wstring cs1Path = L"ControlSet001\\Services\\" + std::wstring(SERVICE_NAME);
     std::wstring cs2Path = L"ControlSet002\\Services\\" + std::wstring(SERVICE_NAME);
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, cs1Path.c_str());

@@ -64,6 +64,7 @@
 
 // Raw resource IDs
 #define IDR_DEFAULT_TARGETS         170
+#define IDR_DRIVER_PAYLOAD          172
 
 // Next default values for new objects
 //

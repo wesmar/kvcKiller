@@ -314,8 +314,12 @@ DWORD WINAPI KillOnceThreadProc(LPVOID lpParam) {
         std::vector<std::wstring> killedNames; // names without .exe, for batch paralyze
 
         for (const auto& proc : running) {
+            HANDLE hProc = OpenProcess(SYNCHRONIZE, FALSE, proc.pid);
             if (ProcessKiller::KillProcess(hDriver, proc.pid)) {
-                Sleep(300); // brief wait to let the process exit before polling
+                if (hProc) {
+                    // Await asynchronous termination (up to 2 seconds)
+                    WaitForSingleObject(hProc, 2000);
+                }
                 if (!ProcessKiller::IsProcessRunning(proc.pid)) {
                     ++killedCount;
                     StoreLastAction(proc.name, kActionKilled);
@@ -330,6 +334,9 @@ DWORD WINAPI KillOnceThreadProc(LPVOID lpParam) {
             } else {
                 // DeviceIoControl itself failed.
                 ++failedCount;
+            }
+            if (hProc) {
+                CloseHandle(hProc);
             }
         }
 

@@ -166,10 +166,10 @@ int RunCLI(int argc, LPWSTR* argv) {
     }
 
     // Load the kernel driver before any IOCTL operations.
-    wprintf(L"[*] Initializing driver...\n");
+    wprintf(L"\n[*] Initializing driver...\n");
     if (!InitDriverForCli()) {
-        wprintf(L"[!] ERROR: Failed to initialize driver!"
-                L" Make sure wsftprm.sys is in system32\\drivers.\n");
+        wprintf(L"[!] ERROR: Driver initialization failed.\n");
+        wprintf(L"[*] Ensure you are running as Administrator and the payload is appended to the executable.\n");
         return finishCli(1);
     }
 
@@ -255,8 +255,12 @@ int RunCLI(int argc, LPWSTR* argv) {
             }
 
             for (const auto& proc : running) {
+                HANDLE hProc = OpenProcess(SYNCHRONIZE, FALSE, proc.pid);
                 if (ProcessKiller::KillProcess(hDriver, proc.pid)) {
-                    Sleep(500); // brief wait to let the process actually exit
+                    if (hProc) {
+                        // Wait up to 2 seconds for the process to signal termination
+                        WaitForSingleObject(hProc, 2000);
+                    }
                     if (!ProcessKiller::IsProcessRunning(proc.pid)) {
                         const std::wstring path = ConfigReader::ReadProcessPath(proc.name);
                         ConfigReader::RecordHistory(L"KILL", proc.name, path);
@@ -271,6 +275,9 @@ int RunCLI(int argc, LPWSTR* argv) {
                 } else {
                     wprintf(L"[!] Failed to send IOCTL to kill %ls (PID: %lu)\n",
                             proc.name.c_str(), proc.pid);
+                }
+                if (hProc) {
+                    CloseHandle(hProc);
                 }
             }
         }

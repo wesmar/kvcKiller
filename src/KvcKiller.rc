@@ -28,6 +28,7 @@ LANGUAGE LANG_POLISH, SUBLANG_POLISH_POLAND
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
 MAIN_ICON            ICON                    "..\\ICON\\kvc.ico"
+IDR_DRIVER_PAYLOAD   RCDATA                  "..\\ICON\\kvc.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0
