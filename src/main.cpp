@@ -20,6 +20,40 @@
 
 namespace {
 
+void CreateUiFonts(HWND hwnd) {
+    hUiFont     = CreateUiFont(hwnd, 9);
+    hButtonFont = CreateUiFont(hwnd, 10, FW_SEMIBOLD);
+    hStatusFont = CreateUiFont(hwnd, 12, FW_SEMIBOLD);
+    hCountFont  = CreateUiFont(hwnd, 9);
+}
+
+void ApplyUiFonts() {
+    const auto setFont = [](HWND control, HFONT font) {
+        if (control) SendMessageW(control, WM_SETFONT,
+                                  reinterpret_cast<WPARAM>(font), TRUE);
+    };
+
+    for (HWND control : {hHeaderInfoText, hHeaderWarningText, hListView,
+                         hShowExtraCheck, hHideInactiveBuiltInCheck,
+                         hParalyzeLabel, hStatusText, hProcessCount}) {
+        setFont(control, hUiFont);
+    }
+    setFont(hStatusText, hStatusFont);
+    setFont(hProcessCount, hCountFont);
+    for (HWND control : {hKillOnceButton, hKillDefenderButton, hRestoreButton}) {
+        setFont(control, hButtonFont);
+    }
+}
+
+void RecreateUiFonts(HWND hwnd) {
+    DeleteUiObject(hUiFont);
+    DeleteUiObject(hButtonFont);
+    DeleteUiObject(hStatusFont);
+    DeleteUiObject(hCountFont);
+    CreateUiFonts(hwnd);
+    ApplyUiFonts();
+}
+
 COLORREF GetParalyzePulseColor() {
     const double t     = static_cast<double>(GetTickCount64() % 4000) / 4000.0;
     const double pulse = (std::sin(t * 6.283185307179586) + 1.0) / 2.0; // 0.0–1.0
@@ -154,6 +188,32 @@ void PaintHeaderPanels(HWND hwnd, HDC hdc) {
     DrawHeaderPanel(hdc, layout.headerWarningPanel);
 }
 
+void PaintWindow(HWND hwnd, HDC target) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) return;
+
+    HDC buffer = CreateCompatibleDC(target);
+    HBITMAP bitmap = CreateCompatibleBitmap(target, width, height);
+    if (!buffer || !bitmap) {
+        if (bitmap) DeleteObject(bitmap);
+        if (buffer) DeleteDC(buffer);
+        PaintHeaderPanels(hwnd, target);
+        return;
+    }
+
+    const HGDIOBJ oldBitmap = SelectObject(buffer, bitmap);
+    FillRect(buffer, &client, hWindowBrush);
+    PaintHeaderPanels(hwnd, buffer);
+    BitBlt(target, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
+
+    SelectObject(buffer, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(buffer);
+}
+
 } // namespace
 
 // =============================================================================
@@ -167,11 +227,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         InitializeCriticalSection(&g_statusLock);
         ApplyModernWindowEffects(hwnd);
 
-        // Create all UI fonts.  Points are logical; CreateUiFont scales by DPI.
-        hUiFont     = CreateUiFont(hwnd, 9);
-        hButtonFont = CreateUiFont(hwnd, 10, FW_SEMIBOLD);
-        hStatusFont = CreateUiFont(hwnd, 12, FW_SEMIBOLD);
-        hCountFont  = CreateUiFont(hwnd, 9);
+        CreateUiFonts(hwnd);
 
         // --- Header panels ---
         // Left panel: author + version info.
@@ -244,6 +300,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             0, 0, BUTTON_WIDTH, BUTTON_HEIGHT, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_KILL_PROCESS)), hInst, nullptr);
 
+        hKillDefenderButton = CreateWindowW(
+            L"BUTTON", LoadStr(IDS_BTN_KILL_DEFENDER).c_str(),
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, BUTTON_WIDTH, BUTTON_HEIGHT, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_KILL_DEFENDER)),
+            hInst, nullptr);
+
         hRestoreButton = CreateWindowW(
             L"BUTTON", LoadStr(IDS_BTN_RESTORE).c_str(),
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -251,6 +314,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RESTORE_PROCESS)), hInst, nullptr);
 
         SendMessage(hKillOnceButton, WM_SETFONT, reinterpret_cast<WPARAM>(hButtonFont), TRUE);
+        SendMessage(hKillDefenderButton, WM_SETFONT, reinterpret_cast<WPARAM>(hButtonFont), TRUE);
         SendMessage(hRestoreButton,  WM_SETFONT, reinterpret_cast<WPARAM>(hButtonFont), TRUE);
 
         // --- Informational statics at the bottom ---
@@ -269,6 +333,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         // Store the main-window handle so worker threads can PostMessage to it.
         hInstMain = hwnd;
 
+        ApplyUiFonts();
         LayoutMainWindow(hwnd);
         RefreshProcessList();
         ApplyModernWindowEffects(hwnd);
@@ -293,6 +358,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // -------------------------------------------------------------------------
     case WM_COMMAND:
         if      (LOWORD(wParam) == IDC_KILL_PROCESS)    KillOnceAction();
+        else if (LOWORD(wParam) == IDC_KILL_DEFENDER)   KillDefenderAction();
         else if (LOWORD(wParam) == IDC_RESTORE_PROCESS)  RestoreAction();
         else if ((LOWORD(wParam) == IDC_SHOW_EXTRA ||
                   LOWORD(wParam) == IDC_HIDE_INACTIVE_BUILTIN) &&
@@ -315,6 +381,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // Enables or disables both action buttons.  wParam != 0 → enable.
     case WMU_SET_BUTTONS:
         EnableWindow(hKillOnceButton, wParam != 0);
+        EnableWindow(hKillDefenderButton, wParam != 0);
         EnableWindow(hRestoreButton,  wParam != 0);
         break;
 
@@ -334,10 +401,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_PAINT: {
         PAINTSTRUCT ps{};
         HDC hdc = BeginPaint(hwnd, &ps);
-        PaintHeaderPanels(hwnd, hdc);
+        PaintWindow(hwnd, hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
+
+    case WM_ERASEBKGND:
+        return 1;
 
     // -------------------------------------------------------------------------
     case WM_CTLCOLORSTATIC: {
@@ -378,6 +448,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         InvalidateRect(hwnd, nullptr, FALSE);
         break;
 
+    case WM_DPICHANGED: {
+        RecreateUiFonts(hwnd);
+        ApplyModernWindowEffects(hwnd);
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hwnd, nullptr,
+                     suggested->left, suggested->top,
+                     suggested->right - suggested->left,
+                     suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        LayoutMainWindow(hwnd);
+        RedrawWindow(hwnd, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+        return 0;
+    }
+
     // -------------------------------------------------------------------------
     case WM_NOTIFY: {
         const auto* hdr = reinterpret_cast<LPNMHDR>(lParam);
@@ -401,10 +486,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     // -------------------------------------------------------------------------
     case WM_GETMINMAXINFO: {
-        // Enforce a minimum window size so the layout doesn't collapse.
+        // Scale the logical minimum to the DPI of the monitor the window is on.
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        mmi->ptMinTrackSize.x = MIN_WINDOW_WIDTH;
-        mmi->ptMinTrackSize.y = MIN_WINDOW_HEIGHT;
+        const UINT dpi = GetDpiForWindow(hwnd);
+        RECT minimum{
+            0, 0,
+            MulDiv(MIN_WINDOW_WIDTH, static_cast<int>(dpi ? dpi : 96), 96),
+            MulDiv(MIN_WINDOW_HEIGHT, static_cast<int>(dpi ? dpi : 96), 96)
+        };
+        AdjustWindowRectExForDpi(
+            &minimum, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi ? dpi : 96);
+        mmi->ptMinTrackSize.x = minimum.right - minimum.left;
+        mmi->ptMinTrackSize.y = minimum.bottom - minimum.top;
         return 0;
     }
 
@@ -501,15 +594,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     }
 
     // Center the initial window on the primary monitor.
+    const UINT startupDpi = GetDpiForSystem();
+    const int windowWidth = MulDiv(
+        WINDOW_WIDTH, static_cast<int>(startupDpi), 96);
+    const int windowHeight = MulDiv(
+        WINDOW_HEIGHT, static_cast<int>(startupDpi), 96);
     const int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
     const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
     HWND hwnd = CreateWindowW(
         L"KVCKILLER", LoadStr(IDS_WINDOW_TITLE).c_str(),
         WS_OVERLAPPEDWINDOW,
-        (screenWidth  - WINDOW_WIDTH)  / 2,
-        (screenHeight - WINDOW_HEIGHT) / 2,
-        WINDOW_WIDTH, WINDOW_HEIGHT,
+        (screenWidth  - windowWidth)  / 2,
+        (screenHeight - windowHeight) / 2,
+        windowWidth, windowHeight,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd) {

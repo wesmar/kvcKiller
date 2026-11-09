@@ -70,6 +70,9 @@
     <ClCompile Include="UIHelpers.cpp" />
     <ClCompile Include="Utils.cpp" />
     <ClCompile Include="DriverController.cpp" />
+    <ClCompile Include="DriverPayload.cpp" />
+    <ClCompile Include="KillEngine.cpp" />
+    <ClCompile Include="PplUnprotector.cpp" />
     <ClCompile Include="ProcessKiller.cpp" />
     <ClCompile Include="ConfigReader.cpp" />
   </ItemGroup>
@@ -81,6 +84,10 @@
     <ClInclude Include="UIHelpers.h" />
     <ClInclude Include="Utils.h" />
     <ClInclude Include="DriverController.h" />
+    <ClInclude Include="DriverPayload.h" />
+    <ClInclude Include="GenIconSize.h" />
+    <ClInclude Include="KillEngine.h" />
+    <ClInclude Include="PplUnprotector.h" />
     <ClInclude Include="ProcessKiller.h" />
     <ClInclude Include="ConfigReader.h" />
     <ClInclude Include="Resource.h" />

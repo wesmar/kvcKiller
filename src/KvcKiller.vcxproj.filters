@@ -39,6 +39,15 @@
     <ClCompile Include="DriverController.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DriverPayload.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="KillEngine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="PplUnprotector.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ProcessKiller.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -66,6 +75,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DriverController.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DriverPayload.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GenIconSize.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KillEngine.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PplUnprotector.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ProcessKiller.h">

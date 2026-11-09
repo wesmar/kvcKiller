@@ -15,6 +15,7 @@
 #define IDC_SHOW_EXTRA              1003
 #define IDC_HIDE_INACTIVE_BUILTIN   1004
 #define IDC_CHK_PARALYZE            1005
+#define IDC_KILL_DEFENDER           1006
 #define IDC_REFRESH_TIMER           1
 #define IDC_PARALYZE_TIMER          2
 
@@ -38,6 +39,7 @@
 #define IDS_BTN_RESTORE             131
 #define IDS_CHK_SHOW_EXTRA          132
 #define IDS_CHK_HIDE_INACTIVE       133
+#define IDS_BTN_KILL_DEFENDER       134
 
 // String table IDs — status bar messages
 #define IDS_STATUS_READY            140
@@ -52,6 +54,7 @@
 #define IDS_STATUS_ALREADY_DEAD     149
 #define IDS_STATUS_ALREADY_RUNNING  150
 #define IDS_STATUS_DRIVER_ERR       151
+#define IDS_STATUS_KILLING_DEFENDER 152
 
 // String table IDs — error dialog messages
 #define IDS_ERR_CAPTION             160

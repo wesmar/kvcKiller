@@ -1,4 +1,4 @@
-# Skrypty lokalne
+# Local helper scripts
 git-push.sh
 pack-release.sh
 pack-data.sh
@@ -6,7 +6,7 @@ release-update.sh
 release-now.sh
 struktura.txt
 
-# Pliki środowiskowe
+# Environment files
 .env
 .env.*
 
@@ -18,7 +18,9 @@ KvcKiller.7z
 
 # Build artifacts
 bin/
+bin-test/
 obj/
+obj-test/
 build/
 dist/
 *.exe

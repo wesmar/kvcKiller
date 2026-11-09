@@ -19,10 +19,15 @@ struct MainLayoutRects {
     RECT paralyzeCheck{};
     RECT paralyzeLabel{};
     RECT killButton{};
+    RECT killDefenderButton{};
     RECT restoreButton{};
     RECT status{};
     RECT count{};
+    UINT dpi = 96;
 };
+
+/// Scales a logical 96-DPI value to the window's current monitor DPI.
+int ScaleForDpi(HWND hwnd, int logicalPixels);
 
 // ---------------------------------------------------------------------------
 // Font / GDI object helpers

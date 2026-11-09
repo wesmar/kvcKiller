@@ -35,6 +35,9 @@
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
 #endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
 #ifndef DWMSBT_MAINWINDOW
 #define DWMSBT_MAINWINDOW 2  // Mica material backdrop
 #endif
@@ -119,15 +122,12 @@ RECT MakeRect(int left, int top, int width, int height) {
 // Measures the pixel width needed to display a checkbox + label, clamped to
 // [minWidth, maxWidth].  The +34 adds space for the checkbox square and
 // a few pixels of breathing room on each side.
-int MeasureToggleWidth(HWND hwnd, const std::wstring& text, int minWidth, int maxWidth) {
-    if (!hwnd || text.empty()) {
-        return minWidth;
-    }
+int MeasureToggleWidth(HWND hwnd, const std::wstring& text, int dpi) {
+    const int minimum = MulDiv(130, dpi, 96);
+    if (!hwnd || text.empty()) return minimum;
 
     HDC hdc = GetDC(hwnd);
-    if (!hdc) {
-        return minWidth;
-    }
+    if (!hdc) return minimum;
 
     HFONT font = hUiFont ? hUiFont : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     const auto oldFont = static_cast<HFONT>(SelectObject(hdc, font));
@@ -138,11 +138,43 @@ int MeasureToggleWidth(HWND hwnd, const std::wstring& text, int minWidth, int ma
     SelectObject(hdc, oldFont);
     ReleaseDC(hwnd, hdc);
 
-    // Checkbox square + breathing room around the label.
-    return min(max(size.cx + 34, minWidth), maxWidth);
+    // Auto-checkbox image, padding, and a little side bearing.
+    const int chrome = MulDiv(34, dpi, 96);
+    return max(size.cx + chrome, minimum);
+}
+
+int MeasureWrappedControlHeight(HWND control, int width) {
+    if (!control || width <= 0) return 0;
+
+    const int textLength = GetWindowTextLengthW(control);
+    if (textLength <= 0) return 0;
+
+    std::wstring text(static_cast<size_t>(textLength) + 1, L'\0');
+    GetWindowTextW(control, text.data(), textLength + 1);
+    text.resize(static_cast<size_t>(textLength));
+
+    HDC dc = GetDC(control);
+    if (!dc) return 0;
+
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0));
+    const HGDIOBJ oldFont = SelectObject(
+        dc, font ? font : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT)));
+
+    RECT bounds{0, 0, width, 1};
+    DrawTextW(dc, text.c_str(), -1, &bounds,
+              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+
+    SelectObject(dc, oldFont);
+    ReleaseDC(control, dc);
+    return bounds.bottom - bounds.top;
 }
 
 } // namespace
+
+int ScaleForDpi(HWND hwnd, int logicalPixels) {
+    const UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 96;
+    return MulDiv(logicalPixels, static_cast<int>(dpi ? dpi : 96), 96);
+}
 
 // ---------------------------------------------------------------------------
 // Font helpers
@@ -205,10 +237,27 @@ void ApplyModernWindowEffects(HWND hwnd) {
     BOOL dark = g_isDarkMode ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
-    if (IsWindows11OrLater()) {
-        // Mica material — the window background blends with the desktop wallpaper.
+    HIGHCONTRASTW contrast{sizeof(contrast)};
+    const bool highContrast =
+        SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)
+        && (contrast.dwFlags & HCF_HIGHCONTRASTON);
+
+    bool mica = false;
+    if (IsWindows11OrLater() && !highContrast) {
         constexpr DWORD kMica = DWMSBT_MAINWINDOW;
-        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &kMica, sizeof(kMica));
+        mica = SUCCEEDED(DwmSetWindowAttribute(
+            hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &kMica, sizeof(kMica)));
+    }
+    // GDI writes zero alpha into the redirection surface. Extending the frame
+    // into the whole client on such a window makes the entire UI translucent.
+    // Keep the native frame opaque until the client is moved to a Direct2D
+    // premultiplied-alpha surface.
+    const MARGINS frame{};
+    DwmExtendFrameIntoClientArea(hwnd, &frame);
+    if (!mica) {
+        const COLORREF caption = g_windowColor;
+        DwmSetWindowAttribute(
+            hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     }
 
     // Rounded corners — cosmetic only, no impact on hit testing.
@@ -242,85 +291,125 @@ void ApplyModernWindowEffects(HWND hwnd) {
 // each toggle is shrunk and/or the gaps are reduced proportionally.
 MainLayoutRects CalculateMainLayout(HWND hwnd) {
     MainLayoutRects layout{};
-    if (!hwnd) {
-        return layout;
-    }
+    if (!hwnd) return layout;
 
     RECT rc{};
     GetClientRect(hwnd, &rc);
     const int clientWidth  = rc.right  - rc.left;
     const int clientHeight = rc.bottom - rc.top;
+    const UINT dpi = GetDpiForWindow(hwnd);
+    layout.dpi = dpi ? dpi : 96;
+
+    const auto scale = [dpi](int value) {
+        return MulDiv(value, static_cast<int>(dpi ? dpi : 96), 96);
+    };
+
+    const int margin       = scale(kMarginX);
+    const int topMargin    = scale(kTopMargin);
+    const int headerPadX   = scale(kHeaderPaddingX);
+    const int headerPadY   = scale(kHeaderPaddingY);
+    const int headerGapX   = scale(kHeaderGapX);
+    const int toggleHeight = scale(kToggleHeight);
+    const int toggleGapX   = scale(kToggleGapX);
+    const int toggleGapY   = scale(8);
+    const int sectionGapY  = scale(kGapY);
+    const int buttonWidth  = scale(BUTTON_WIDTH);
+    const int buttonHeight = scale(BUTTON_HEIGHT);
+    const int buttonGap    = scale(kButtonGap);
+    const int countHeight  = scale(kCountHeight);
+    const int statusHeight = scale(kStatusHeight);
 
     // Vertical anchor points calculated bottom-up.
-    const int buttonRowY  = clientHeight - kMarginX - kCountHeight - kStatusHeight - BUTTON_HEIGHT - 18;
-    const int toggleY     = kTopMargin + kHeaderHeight + 10;
-    const int listY       = toggleY + kToggleHeight + kGapY;
-    const int listHeight  = max(180, buttonRowY - kGapY - listY);
-    const int listWidth   = clientWidth - (kMarginX * 2);
+    const int buttonRowY = clientHeight - margin - countHeight - statusHeight
+        - buttonHeight - scale(18);
+    const int listWidth = max(0, clientWidth - (margin * 2));
 
     // Split the header area ~34/66 between info and warning panels.
-    const int headerWidth     = max(0, listWidth - kHeaderGapX);
-    const int leftPanelWidth  = max(250, min(360, (headerWidth * 34) / 100));
+    const int headerWidth = max(0, listWidth - headerGapX);
+    const int leftPanelWidth = max(scale(250),
+        min(scale(360), (headerWidth * 34) / 100));
     const int rightPanelWidth = max(0, headerWidth - leftPanelWidth);
 
-    // Center the Kill/Restore pair horizontally.
-    const int totalButtonsWidth = (BUTTON_WIDTH * 2) + kButtonGap;
-    const int startX            = (clientWidth - totalButtonsWidth) / 2;
+    // Header height follows the wrapped text instead of clipping the copy.
+    const int leftTextHeight = MeasureWrappedControlHeight(
+        hHeaderInfoText, max(0, leftPanelWidth - headerPadX * 2));
+    const int rightTextHeight = MeasureWrappedControlHeight(
+        hHeaderWarningText, max(0, rightPanelWidth - headerPadX * 2));
+    const int headerHeight = max(scale(kHeaderHeight),
+        max(leftTextHeight, rightTextHeight) + headerPadY * 2);
 
-    layout.headerInfoPanel    = MakeRect(kMarginX, kTopMargin, leftPanelWidth, kHeaderHeight);
-    layout.headerWarningPanel = MakeRect(kMarginX + leftPanelWidth + kHeaderGapX,
-                                          kTopMargin, rightPanelWidth, kHeaderHeight);
-    layout.headerInfoText     = MakeRect(layout.headerInfoPanel.left  + kHeaderPaddingX,
-                                          layout.headerInfoPanel.top   + kHeaderPaddingY,
-                                          max(0, leftPanelWidth  - (kHeaderPaddingX * 2)),
-                                          max(0, kHeaderHeight   - (kHeaderPaddingY * 2)));
-    layout.headerWarningText  = MakeRect(layout.headerWarningPanel.left + kHeaderPaddingX,
-                                          layout.headerWarningPanel.top  + kHeaderPaddingY,
-                                          max(0, rightPanelWidth - (kHeaderPaddingX * 2)),
-                                          max(0, kHeaderHeight   - (kHeaderPaddingY * 2)));
+    layout.headerInfoPanel = MakeRect(margin, topMargin, leftPanelWidth, headerHeight);
+    layout.headerWarningPanel = MakeRect(
+        margin + leftPanelWidth + headerGapX, topMargin,
+        rightPanelWidth, headerHeight);
+    layout.headerInfoText     = MakeRect(layout.headerInfoPanel.left  + headerPadX,
+                                          layout.headerInfoPanel.top   + headerPadY,
+                                          max(0, leftPanelWidth - headerPadX * 2),
+                                          max(0, headerHeight - headerPadY * 2));
+    layout.headerWarningText = MakeRect(
+        layout.headerWarningPanel.left + headerPadX,
+        layout.headerWarningPanel.top + headerPadY,
+        max(0, rightPanelWidth - headerPadX * 2),
+        max(0, headerHeight - headerPadY * 2));
 
-    // Measure each toggle against the real font/locale text.
-    int showExtraWidth    = MeasureToggleWidth(hwnd, LoadStr(IDS_CHK_SHOW_EXTRA),   250, max(250, listWidth / 2));
-    int paralyzeWidth     = MeasureToggleWidth(hwnd, LoadStr(IDS_CHK_PARALYZE),     180, 260);
-    int hideInactiveWidth = MeasureToggleWidth(hwnd, LoadStr(IDS_CHK_HIDE_INACTIVE),220, 300);
+    // Lay out toggles at their measured width. If the row cannot fit them,
+    // continue on the next line without truncating any label.
+    int x = margin;
+    int y = topMargin + headerHeight + scale(10);
+    const int rowRight = margin + listWidth;
+    auto nextToggle = [&](int desiredWidth) {
+        const int width = min(desiredWidth, listWidth);
+        if (x != margin && x + width > rowRight) {
+            x = margin;
+            y += toggleHeight + toggleGapY;
+        }
+        const RECT result = MakeRect(x, y, width, toggleHeight);
+        x += width + toggleGapX;
+        return result;
+    };
 
-    int gapX             = kToggleGapX;
-    int totalToggleWidth = showExtraWidth + paralyzeWidth + hideInactiveWidth + (gapX * 2);
+    const int showExtraWidth = MeasureToggleWidth(hwnd, LoadStr(IDS_CHK_SHOW_EXTRA), static_cast<int>(dpi));
+    const int paralyzeWidth = MeasureToggleWidth(hwnd, LoadStr(IDS_CHK_PARALYZE), static_cast<int>(dpi));
+    const int hideInactiveWidth = MeasureToggleWidth(hwnd, LoadStr(IDS_CHK_HIDE_INACTIVE), static_cast<int>(dpi));
 
-    // First shrink pass: reduce the widest toggle if combined width overflows.
-    if (totalToggleWidth > listWidth) {
-        const int shrink = totalToggleWidth - listWidth;
-        showExtraWidth   = max(220, showExtraWidth - shrink);
-        totalToggleWidth = showExtraWidth + paralyzeWidth + hideInactiveWidth + (gapX * 2);
-    }
-    // Second shrink pass: reduce the gaps if toggling alone wasn't enough.
-    if (totalToggleWidth > listWidth) {
-        gapX             = max(12, (listWidth - (showExtraWidth + paralyzeWidth + hideInactiveWidth)) / 2);
-        totalToggleWidth = showExtraWidth + paralyzeWidth + hideInactiveWidth + (gapX * 2);
-    }
+    layout.showExtraToggle = nextToggle(showExtraWidth);
+    const RECT paralyzeBounds = nextToggle(paralyzeWidth);
+    const int paralyzeBoxWidth = scale(15);
+    layout.paralyzeCheck = MakeRect(
+        paralyzeBounds.left, paralyzeBounds.top,
+        paralyzeBoxWidth, paralyzeBounds.bottom - paralyzeBounds.top);
+    layout.paralyzeLabel = MakeRect(
+        layout.paralyzeCheck.right + scale(4), paralyzeBounds.top + 1,
+        max(0, paralyzeBounds.right - layout.paralyzeCheck.right - scale(4)),
+        paralyzeBounds.bottom - paralyzeBounds.top - 1);
+    layout.hideInactiveToggle = nextToggle(hideInactiveWidth);
 
-    // The paralyze checkbox is split: a narrow box (15 px) + the label text.
-    // This prevents the OS focus rectangle from bleeding into adjacent controls.
-    int paralyzeBoxWidth  = 15;
-    int paralyzeTextWidth = paralyzeWidth - paralyzeBoxWidth;
+    const int listY = y + toggleHeight + sectionGapY;
+    const int listHeight = max(scale(150), buttonRowY - sectionGapY - listY);
+    layout.list = MakeRect(margin, listY, listWidth, listHeight);
 
-    const int toggleStartX = kMarginX + max(0, (listWidth - totalToggleWidth) / 2);
+    // Three equal buttons remain centered at the original window width.
+    const int totalButtonsWidth = buttonWidth * 3 + buttonGap * 2;
+    const int actualButtonWidth = totalButtonsWidth <= listWidth
+        ? buttonWidth
+        : max(scale(120), (listWidth - buttonGap * 2) / 3);
+    const int actualButtonsWidth = actualButtonWidth * 3 + buttonGap * 2;
+    const int buttonStartX = margin + max(0, (listWidth - actualButtonsWidth) / 2);
 
-    layout.showExtraToggle    = MakeRect(toggleStartX, toggleY, showExtraWidth, kToggleHeight);
-    layout.paralyzeCheck      = MakeRect(layout.showExtraToggle.right + gapX,
-                                          toggleY, paralyzeBoxWidth, kToggleHeight);
-    layout.paralyzeLabel      = MakeRect(layout.paralyzeCheck.right + 4,
-                                          toggleY + 1, paralyzeTextWidth, kToggleHeight - 1);
-    layout.hideInactiveToggle = MakeRect(layout.showExtraToggle.right + gapX + paralyzeWidth + gapX,
-                                          toggleY, hideInactiveWidth, kToggleHeight);
-    layout.list               = MakeRect(kMarginX, listY, listWidth, listHeight);
-    layout.killButton         = MakeRect(startX, buttonRowY, BUTTON_WIDTH, BUTTON_HEIGHT);
-    layout.restoreButton      = MakeRect(startX + BUTTON_WIDTH + kButtonGap, buttonRowY,
-                                          BUTTON_WIDTH, BUTTON_HEIGHT);
-    layout.status             = MakeRect(kMarginX, buttonRowY + BUTTON_HEIGHT + 10,
-                                          listWidth, kStatusHeight);
-    layout.count              = MakeRect(kMarginX, clientHeight - kMarginX - kCountHeight,
-                                          listWidth, kCountHeight);
+    layout.killButton = MakeRect(
+        buttonStartX, buttonRowY, actualButtonWidth, buttonHeight);
+    layout.killDefenderButton = MakeRect(
+        layout.killButton.right + buttonGap, buttonRowY,
+        actualButtonWidth, buttonHeight);
+    layout.restoreButton = MakeRect(
+        layout.killDefenderButton.right + buttonGap, buttonRowY,
+        actualButtonWidth, buttonHeight);
+    layout.status = MakeRect(
+        margin, buttonRowY + buttonHeight + scale(10),
+        listWidth, statusHeight);
+    layout.count = MakeRect(
+        margin, clientHeight - margin - countHeight,
+        listWidth, countHeight);
 
     return layout;
 }
@@ -333,71 +422,44 @@ void LayoutMainWindow(HWND hwnd) {
     if (!hwnd           || !hHeaderInfoText         || !hHeaderWarningText      ||
         !hListView       || !hShowExtraCheck         || !hHideInactiveBuiltInCheck ||
         !hParalyzeCheck  || !hParalyzeLabel          ||
-        !hKillOnceButton || !hRestoreButton          ||
+        !hKillOnceButton || !hKillDefenderButton     || !hRestoreButton ||
         !hStatusText     || !hProcessCount)
         return;
 
     const MainLayoutRects layout = CalculateMainLayout(hwnd);
 
-    // Move every child using the precomputed rects.  The MoveWindow calls are
-    // written out individually (rather than in a loop) for readability and so
-    // each control maps clearly to its layout rect field.
-    MoveWindow(hHeaderInfoText,
-               layout.headerInfoText.left, layout.headerInfoText.top,
-               layout.headerInfoText.right  - layout.headerInfoText.left,
-               layout.headerInfoText.bottom - layout.headerInfoText.top, TRUE);
-    MoveWindow(hHeaderWarningText,
-               layout.headerWarningText.left, layout.headerWarningText.top,
-               layout.headerWarningText.right  - layout.headerWarningText.left,
-               layout.headerWarningText.bottom - layout.headerWarningText.top, TRUE);
-    MoveWindow(hShowExtraCheck,
-               layout.showExtraToggle.left, layout.showExtraToggle.top,
-               layout.showExtraToggle.right  - layout.showExtraToggle.left,
-               layout.showExtraToggle.bottom - layout.showExtraToggle.top, TRUE);
-    MoveWindow(hHideInactiveBuiltInCheck,
-               layout.hideInactiveToggle.left, layout.hideInactiveToggle.top,
-               layout.hideInactiveToggle.right  - layout.hideInactiveToggle.left,
-               layout.hideInactiveToggle.bottom - layout.hideInactiveToggle.top, TRUE);
-    MoveWindow(hListView,
-               layout.list.left, layout.list.top,
-               layout.list.right  - layout.list.left,
-               layout.list.bottom - layout.list.top, TRUE);
-    MoveWindow(hParalyzeCheck,
-               layout.paralyzeCheck.left, layout.paralyzeCheck.top,
-               layout.paralyzeCheck.right  - layout.paralyzeCheck.left,
-               layout.paralyzeCheck.bottom - layout.paralyzeCheck.top, TRUE);
-    MoveWindow(hParalyzeLabel,
-               layout.paralyzeLabel.left, layout.paralyzeLabel.top,
-               layout.paralyzeLabel.right  - layout.paralyzeLabel.left,
-               layout.paralyzeLabel.bottom - layout.paralyzeLabel.top, TRUE);
-    MoveWindow(hKillOnceButton,
-               layout.killButton.left, layout.killButton.top,
-               layout.killButton.right  - layout.killButton.left,
-               layout.killButton.bottom - layout.killButton.top, TRUE);
-    MoveWindow(hRestoreButton,
-               layout.restoreButton.left, layout.restoreButton.top,
-               layout.restoreButton.right  - layout.restoreButton.left,
-               layout.restoreButton.bottom - layout.restoreButton.top, TRUE);
-    MoveWindow(hStatusText,
-               layout.status.left, layout.status.top,
-               layout.status.right  - layout.status.left,
-               layout.status.bottom - layout.status.top, TRUE);
-    MoveWindow(hProcessCount,
-               layout.count.left, layout.count.top,
-               layout.count.right  - layout.count.left,
-               layout.count.bottom - layout.count.top, TRUE);
+    auto place = [](HWND control, const RECT& rect) {
+        SetWindowPos(control, nullptr, rect.left, rect.top,
+                     rect.right - rect.left, rect.bottom - rect.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    };
+
+    place(hHeaderInfoText, layout.headerInfoText);
+    place(hHeaderWarningText, layout.headerWarningText);
+    place(hShowExtraCheck, layout.showExtraToggle);
+    place(hHideInactiveBuiltInCheck, layout.hideInactiveToggle);
+    place(hListView, layout.list);
+    place(hParalyzeCheck, layout.paralyzeCheck);
+    place(hParalyzeLabel, layout.paralyzeLabel);
+    place(hKillOnceButton, layout.killButton);
+    place(hKillDefenderButton, layout.killDefenderButton);
+    place(hRestoreButton, layout.restoreButton);
+    place(hStatusText, layout.status);
+    place(hProcessCount, layout.count);
 
     // Column 0 (Name) takes up all remaining space after the fixed-width columns.
     // Subtract 8 extra pixels to avoid a horizontal scrollbar from rounding.
-    const int nameWidth = max(kColNameMinCx,
+    const int nameWidth = max(ScaleForDpi(hwnd, kColNameMinCx),
         (layout.list.right - layout.list.left)
-        - kColSourceCx - kColPidCx - kColStatusCx - kColLastActionCx - 8);
+        - ScaleForDpi(hwnd, kColSourceCx) - ScaleForDpi(hwnd, kColPidCx)
+        - ScaleForDpi(hwnd, kColStatusCx) - ScaleForDpi(hwnd, kColLastActionCx)
+        - ScaleForDpi(hwnd, 8));
 
     ListView_SetColumnWidth(hListView, 0, nameWidth);
-    ListView_SetColumnWidth(hListView, 1, kColSourceCx);
-    ListView_SetColumnWidth(hListView, 2, kColPidCx);
-    ListView_SetColumnWidth(hListView, 3, kColStatusCx);
-    ListView_SetColumnWidth(hListView, 4, kColLastActionCx);
+    ListView_SetColumnWidth(hListView, 1, ScaleForDpi(hwnd, kColSourceCx));
+    ListView_SetColumnWidth(hListView, 2, ScaleForDpi(hwnd, kColPidCx));
+    ListView_SetColumnWidth(hListView, 3, ScaleForDpi(hwnd, kColStatusCx));
+    ListView_SetColumnWidth(hListView, 4, ScaleForDpi(hwnd, kColLastActionCx));
 }
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@
 Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headless CLI
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)
-![Language](https://img.shields.io/badge/language-C%2B%2B20-orange)
+![Language](https://img.shields.io/badge/language-C%2B%2B23-orange)
 ![CRT](https://img.shields.io/badge/CRT-static%20%2FMT-green)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
@@ -29,6 +29,21 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 ---
 
+## What's New - 09.11.2026
+
+KvcKiller 2.0 replaces the previous single-driver path with the two-stage
+signed-driver design used by WinDefCtl. The old `wsftprm.sys` approach depended on a
+vulnerable driver and could require an unsafe driver-blocklist exception. The new pipeline
+lowers target protection with one component, performs termination with a separate component,
+and applies IFEO before the kill phase.
+
+The GUI now provides **KILL DEFENDER** for `MsMpEng`, `SecurityHealthService`, and
+`SecurityHealthSystray`. CLI adds `-kill-defender` and `-restore-defender`, with outcome
+reporting based on the original PID instances and service state. A service restart with a
+new PID no longer turns a successful one-shot kill into `FAILED`.
+
+---
+
 ## Table of Contents
 
 - [Feature Overview](#feature-overview)
@@ -47,7 +62,7 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 - [Registry & Configuration](#registry--configuration)
 - [Module Map](#module-map)
 - [Build](#build)
-- [Security Notes](#security-notes)
+- [Kernel Components](#kernel-components)
 - [System Requirements](#system-requirements)
 
 ---
@@ -60,16 +75,19 @@ Self-protection at ring 3 is irrelevant when the termination signal arrives from
 
 ### Kill Engine
 
-- **Kernel IOCTL termination** — driver handle opened to `\\.\Warsaw_PM`; PID sent via
-  `DeviceIoControl` (IOCTL `0x22201C`); process terminated from ring 0
-- **Driver stealth loading** — `NtLoadDriver` / `NtUnloadDriver` via direct NTDLL calls; no
-  `CreateService`, no visible entry in `services.msc` during the session
-- **Privilege escalation** — `RtlAdjustPrivilege` for `SeLoadDriverPrivilege` and
-  `SeDebugPrivilege`; TrustedInstaller impersonation for DriverStore writes
-- **Driver embedded in icon** — the kernel driver is compressed as an **LZX Cabinet archive**
-  (equivalent to `makecab /D CompressionType=LZX /D CompressionMemory=21 /D MaxDiskSize=0`)
-  and appended to `KvcKiller.ico`; extracted on demand via the Windows FDI API; no separate
-  `.sys` file to distribute or detect
+- **Dual kernel pipeline** — the first component exposes kernel memory primitives and lowers
+  the target's `EPROCESS` protection; the second component sends the termination request for
+  the now-unprotected process
+- **Two independent services** — `KvcPplUnprotect` and `KvcProcessKill` are demand-start
+  services loaded from extensionless images in `System32\drivers`
+- **FDI-backed payload** — both driver images are packed into one LZX Cabinet appended to
+  `KvcKiller.ico`. The extractor dispatches FDI output handles per cabinet member, verifies
+  both names and byte content, then stages the two files independently
+- **Fail-safe sequencing** — a PPL write is accepted only after a read-back confirms the
+  protection byte is zero. If the kernel termination request is rejected, the engine attempts
+  a user-mode `TerminateProcess` fallback
+- **Deterministic cleanup** — both handles are closed, both services are stopped and deleted,
+  the temporary K7 caller-path value is restored, and both driver files are removed
 
 ### Paralyze Mode
 
@@ -96,11 +114,15 @@ Self-protection at ring 3 is irrelevant when the termination signal arrives from
 
 - Win32 ListView with 5 columns (Process Name, Source, PID, Status, Last Action),
   click-to-sort
-- Dark / light mode auto-detected; **Mica backdrop** on Windows 11; animated **sine-pulse**
-  Paralyze label
+- Dark / light mode auto-detected; DWM **Mica backdrop** and rounded corners on Windows 11;
+  **Per-Monitor-V2** layout, fonts, columns, and minimum window size; animated
+  **sine-pulse** Paralyze label
 - **PARALYZED** row state: orange color, distinct from red KILLED, persists across restarts
-- "Show extra processes" — appends running processes not in the config list
-- "Hide inactive built-in targets" — collapses not-running entries with no pending action
+- **KILL DEFENDER** handles `MsMpEng`, `SecurityHealthService`, and
+  `SecurityHealthSystray` as one action without changing the user's checked rows
+- Filters use full measured labels and wrap to another row when the window is too narrow
+- "Show extra processes" appends running processes outside the target list
+- "Hide inactive targets" collapses not-running entries with no pending action
 - Worker threads for kill and restore; atomic shutdown coordination; UI stays responsive
 
 ### CLI
@@ -120,20 +142,20 @@ flowchart TD
     D --> E[ListViewManager]
     D --> F[ProcessOperations]
     D --> G[UIHelpers]
-    F --> H[DriverController]
-    F --> I[ProcessKiller]
-    F --> J[ConfigReader]
-    F --> K[IFEO offline edit]
-    H --> L[NtLoadDriver]
-    H --> M[FDI — icon CAB]
-    H --> N[TrustedInstaller]
-    I --> O[DeviceIoControl IOCTL]
-    I --> P[CreateToolhelp32Snapshot]
-    K --> Q[RegSaveKeyEx / RegLoadKey]
-    K --> R[RegRestoreKey]
+    F --> H[KillEngine]
+    H --> I[PplUnprotector]
+    H --> J[ProcessKiller]
+    H --> K[DriverController]
+    K --> L[DriverPayload / multi-file FDI]
+    I --> M[Driver 1: EPROCESS unprotect]
+    J --> N[Driver 2: handshake and kill IOCTL]
+    F --> R[ConfigReader]
+    F --> O[IFEO offline edit]
+    O --> P[RegSaveKeyEx / RegLoadKey]
+    O --> Q[RegRestoreKey]
     C --> H
-    C --> I
     C --> J
+    C --> R
 ```
 
 ```
@@ -148,9 +170,12 @@ WinMain
        │    └─ WM_PAINT      →  PaintHeaderPanels (custom rounded rects)
        ├─ UIHelpers           (fonts, dark mode, Mica, DPI-aware layout)
        ├─ ListViewManager     (columns, custom draw, row flag bits, IFEO cold-start check)
-       ├─ ProcessOperations   (worker threads, IFEO paralyze/unparalyze, driver init)
-       ├─ ProcessKiller       (FindProcesses, KillProcess, RestoreProcesses)
-       ├─ DriverController    (FDI extract → DriverStore → NtLoad → IOCTL → NtUnload)
+       ├─ ProcessOperations   (worker threads, batch protection, IFEO paralyze/unparalyze)
+       ├─ KillEngine          (dual-driver session, ordered kill, verification, fallback)
+       ├─ PplUnprotector      (offset discovery, EPROCESS walk, protection-byte update)
+       ├─ ProcessKiller       (discovery, terminator IOCTL, restoration)
+       ├─ DriverController    (two SCM services, device handles, configuration, cleanup)
+       ├─ DriverPayload       (single CAB, independent in-memory FDI outputs)
        └─ ConfigReader        (HKCU registry: target list, path cache, history ring buffer)
 ```
 
@@ -180,42 +205,47 @@ cross-thread `SendMessage` is needed.
 
 ```mermaid
 flowchart LR
-    A[KillOnceAction] --> B[InitializeDriver]
-    B --> C{Already loaded?}
-    C -->|Yes| G
-    C -->|No| D[ExtractDriverFromIcon]
-    D --> E[FDI — icon LZX CAB → DriverStore]
-    E --> F[TrustedInstaller impersonation]
-    F --> G[RegisterDriver — SCM registry key]
-    G --> H[RtlAdjustPrivilege SeLoadDriver]
-    H --> I[NtLoadDriver]
-    I --> J[GetDriverHandle — open Warsaw_PM]
-    J --> K[DeviceIoControl IOCTL kill loop]
-    K --> L[CloseDriverHandle]
-    L --> M[NtUnloadDriver]
-    M --> N[CleanupDriverRegistry]
+    A[Kill action] --> B[KillEngine::Start]
+    B --> C[FDI: CAB to two in-memory outputs]
+    C --> D[Match driver1 and driver2 by name]
+    D --> E[Verify file bytes]
+    E --> F[Register KvcPplUnprotect]
+    E --> G[Register KvcProcessKill]
+    F --> H[Open RTCore64 device]
+    G --> I[Set temporary K7 caller path]
+    I --> J[Open DosK7RKScnDrv device]
+    H --> K[Resolve EPROCESS offsets]
+    J --> L[Terminator handshake]
+    K --> M[Kill pipeline]
+    L --> M
+    M --> N[Close handles and stop services]
+    N --> O[Restore K7 value and delete files]
 ```
 
 **Driver extraction**
 
-The kernel driver binary is stored as an LZX-compressed Cabinet block appended to
-`KvcKiller.ico` (the application icon, embedded as `MAIN_ICON` in the RC file). The
-compression is equivalent to:
+Both kernel images are stored as one LZX-compressed Cabinet appended to `KvcKiller.ico`.
+`build.ps1` records the exact ICO header size in `GenIconSize.h`, so extraction starts at a
+known offset instead of scanning for a coincidental `MSCF` signature. The compression is
+equivalent to:
 
 ```
 makecab /D CompressionType=LZX /D CompressionMemory=21 /D MaxDiskSize=0
 ```
 
-On each Kill operation, `ExtractDriverFromIcon`:
-1. Reads the icon bytes from the PE resource section via `FindResource` / `LockResource`
-2. Scans for the `MSCF` Cabinet signature within the icon binary
-3. Sets up a `MemoryReadContext` and calls `FDICopy` with all-in-memory FDI callbacks
-   (`fdi_read`, `fdi_seek`, `fdi_write`, `fdi_open`, `fdi_close`)
-4. Writes the extracted `.sys` to the DriverStore path using a HANDLE opened under
-   TrustedInstaller impersonation
+On each kill session, the payload layer:
 
-`NtLoadDriver` / `NtUnloadDriver` are called directly from `ntdll.lib` — no
-`CreateService`, no SCM interaction, no visible service entry.
+1. Reads the RCDATA icon resource through `FindResource` / `LockResource`.
+2. Starts FDI at `ICON_HEADER_SIZE` and gives every cabinet output its own handle and buffer.
+3. Associates each handle with the cabinet member name, so `driver2` cannot overwrite
+   `driver1`.
+4. Verifies that both outputs are complete and non-empty before staging them.
+5. Writes `System32\drivers\kvckiller1` and `kvckiller2`, comparing existing bytes before
+   replacing a file.
+
+`DriverController` then registers and starts the two services independently. Driver 2 requires
+a temporary `DirProductBase` value for its caller-path check; KvcKiller saves the previous
+value and restores it during cleanup instead of deleting a pre-existing K7 configuration.
 
 ---
 
@@ -225,37 +255,45 @@ On each Kill operation, `ExtractDriverFromIcon`:
 sequenceDiagram
     participant UI as WndProc (UI thread)
     participant W as KillOnceThreadProc
-    participant D as DriverController
+    participant E as KillEngine
+    participant P as PplUnprotector
     participant K as ProcessKiller
-    participant P as ProcessOperations
+    participant O as ProcessOperations
     UI->>W: CreateThread (IDC_KILL_PROCESS)
     Note over W: WorkerGuard at entry
-    W->>D: InitializeDriver
-    D-->>W: hDriver
+    W->>E: Start
+    E-->>W: PPL and terminator availability
     W->>K: FindProcesses(selected)
     K-->>W: ProcessInfo list (PID, name)
+    W->>E: LowerProtection(all selected PIDs)
+    E->>P: one EPROCESS tree walk
+    P->>P: write 0 to Protection, then read back and verify
     loop for each found process
-        W->>K: KillProcess(hDriver, pid)
-        K->>K: DeviceIoControl IOCTL 0x22201C
+        W->>E: Kill(pid)
+        E->>K: DeviceIoControl IOCTL 0x222018
         K-->>W: success / fail
-        W->>W: collect name in killedNames[]
+        W->>W: verify process object is signalled
     end
     alt paralyzeEnabled
-        W->>P: ParalyzeProcessesBatch(killedNames)
-        P->>P: IFEO offline edit — write Debugger=systray.exe
-        P-->>W: successCount
+        W->>O: ParalyzeProcessesBatch(killedNames)
+        O->>O: IFEO offline edit - write Debugger=systray.exe
+        O-->>W: successCount
         W->>W: promote KILLED → PARALYZED in g_lastActionByName
     end
     W->>UI: PostMessage WMU_REFRESH_LIST
     W->>UI: PostMessage WMU_STATUS_TEXT
+    W->>E: Stop and remove both services
     Note over W: WorkerGuard destructor → NotifyWorkerDone()
 ```
 
 | Step | Detail |
 |------|---------|
 | **Discovery** | `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` + `Process32FirstW/NextW`; matched by base exe name, case-insensitive |
-| **IOCTL** | `DeviceIoControl(hDriver, 0x22201C, buffer, 1036, nullptr, 0, ...)` — PID in first 4 bytes, 1032 bytes zero-padding required by the driver's dispatch handler |
-| **Confirmation** | `IsProcessRunning(pid)` via `WaitForSingleObject(hProcess, 0)` — process object is signalled the instant it exits, more reliable than re-snapshotting |
+| **Offsets** | `PsInitialSystemProcess`, `PsGetProcessId`, and both protection predicates are resolved from the mapped `ntoskrnl.exe`; ambiguous patterns abort the kernel-write phase |
+| **Unprotect** | driver 1 reads the `EPROCESS.ActiveProcessLinks` list once for the complete selected PID batch, writes the protection byte only when non-zero, and verifies the zero value |
+| **Handshake** | `DeviceIoControl(0x00222008)` with `0x77777777`; a reply of `1` marks driver 2 ready |
+| **Kill** | `DeviceIoControl(0x00222018)` sends one `DWORD` PID and reads the kernel `NTSTATUS` |
+| **Confirmation** | `IsProcessRunning(pid)` via `WaitForSingleObject` after the request, with a user-mode fallback only if the kernel request was rejected |
 | **State** | `g_lastActionByName[key] = kActionKilled`; promoted to `kActionParalyzed` if IFEO write succeeded |
 
 ---
@@ -474,9 +512,8 @@ Custom targets can be added to `HKCU\Software\KvcKiller\Targets` or by editing
 | **Process Name** · Source · PID · Status · Last Action | MsMpEng · Built-in · 4812 · RUNNING · `-` |
 | | CylanceSvc · Built-in · — · NOT RUNNING · `KILLED` |
 | | MsMpEng · Built-in · — · NOT RUNNING · `PARALYZED` |
-| Checkboxes | ☐ Show active processes outside target list |
-| | ☐ Hide inactive built-in targets |
-| | ☐ ~~~Paralyze self-restart~~~  `[KILL PROCESS]`  `[RESTORE]` |
+| Checkboxes | ☐ Show extra processes · ☐ ~~~Paralyze self-restart~~~ · ☐ Hide inactive targets |
+| Actions | `[KILL PROCESS]`  `[KILL DEFENDER]`  `[RESTORE]` |
 | Footer | READY · 90 targets · 3 running · 2 extra |
 
 ### ListView Columns
@@ -560,23 +597,40 @@ missing. The synthetic Enter forces `cmd.exe` and PowerShell to redraw the promp
 
 ```
 KvcKiller.exe -help
+KvcKiller.exe -check-drivers
 KvcKiller.exe -list
 KvcKiller.exe -kill <name> [-paralyze]
+KvcKiller.exe -kill-defender
 KvcKiller.exe -restore <name>
+KvcKiller.exe -restore-defender
 ```
 
 | Command | Description |
 |---------|-------------|
 | `-help` | Print usage and exit |
+| `-check-drivers` | Extract and load both kernel components, walk the current process without writing to it, then clean up. Exit `0` means both are ready; `2` means only the PPL unprotector is ready; `3` means only the terminator is ready |
 | `-list` | Enumerate config targets; show PID and running status for each |
-| `-kill <name>` | Load driver, find process by name, send IOCTL kill |
-| `-kill <name> -paralyze` | **Paralyze first** (IFEO injection), then kill — order is reversed vs GUI mode where kill precedes paralyze |
+| `-kill <name>` | Start both drivers, lower protection for the selected PID, send the terminator IOCTL, and verify exit |
+| `-kill <name> -paralyze` | Apply the IFEO trap first, then kill |
+| `-kill-defender` | Apply the same fixed three-process trap-and-kill operation as the GUI's **KILL DEFENDER** button |
 | `-restore <name>` | Unparalyze if needed, then restart via SCM / ShellExecute / CreateProcess |
+| `-restore-defender` | Restore `MsMpEng`, `SecurityHealthService`, and `SecurityHealthSystray` as one set |
 
-> **CLI vs GUI kill+paralyze order:** In CLI mode the IFEO `Debugger` entry is written
-> *before* the kill so the entry is in place before any watchdog can issue a restart.
-> In GUI mode the kill happens first and paralyze follows immediately after — both happen
-> within the same worker thread before any watchdog can react.
+`-check-drivers`, `-list`, and `-restore` do not share a driver session. Only `-kill` starts
+the kernel components. `-check-drivers` exists specifically to validate the extracted CAB,
+both SCM services, the PPL process walk, and the terminator handshake without terminating a
+process.
+
+> **Kill order:** CLI and GUI both write the IFEO `Debugger` entry before the termination
+> phase. GUI's **KILL DEFENDER** always enables that trap for its fixed three-process set.
+> If nothing is checked, **RESTORE** applies to the same set, making the operation reversible
+> without selecting three rows manually.
+
+**Defender success criterion:** the Defender group succeeds when the IFEO traps are active,
+`MsMpEng` is no longer running, and the `WinDefend` service is stopped. A remaining
+`SecurityHealthService` or `SecurityHealthSystray` process does not turn a working
+service-level shutdown into `FAILED`. CLI exit codes are `0` for success/already stopped,
+`2` for a partial result, and `1` when no required control was confirmed.
 
 ---
 
@@ -606,13 +660,16 @@ directly from the registry; the embedded resource is used only to rebuild defaul
 | Module | Responsibility |
 |--------|----------------|
 | **main.cpp** | `WndProc`, `WinMain`; header panel custom drawing (`DrawHeaderPanel`, `PaintHeaderPanels`); `WM_CLOSE` graceful-shutdown logic; `WM_CTLCOLORSTATIC` sine-pulse Paralyze animation; timer dispatch |
-| **DriverController.cpp** | Full driver lifecycle: FDI extraction from icon (LZX CAB), TrustedInstaller impersonation, DriverStore drop, SCM registry key, `NtLoadDriver` / `NtUnloadDriver`, device handle management, `CleanupDriverRegistry` |
-| **ProcessKiller.cpp** | `CreateToolhelp32Snapshot` enumeration; `IsProcessRunning` via `WaitForSingleObject`; `SendIOCTL` / `KillProcess`; `RestoreProcess` / `RestoreProcesses` (SCM → ShellExecute → CreateProcess chain) |
-| **ProcessOperations.cpp** | `KillOnceThreadProc` / `RestoreThreadProc` worker threads; `WorkerGuard` RAII; `KillThreadParams`; IFEO offline hive editing (`ProcessBatchIfeo`); `ParalyzeProcessesBatch` / `UnparalyzeProcessesBatch` / `IsProcessParalyzed`; `InitializeDriver` GUI wrapper; `KillOnceAction` / `RestoreAction` UI triggers |
+| **DriverPayload.cpp** | Multi-file memory-backed Cabinet extraction. Each FDI output has an independent name, handle, buffer, seek position, and completion state |
+| **DriverController.cpp** | Stages both verified images, registers `KvcPplUnprotect` and `KvcProcessKill`, opens `RTCore64` and `DosK7RKScnDrv`, temporarily configures and restores the K7 caller path, then tears down both services and files |
+| **PplUnprotector.cpp** | Resolves `PsInitialSystemProcess` and `EPROCESS` offsets from `ntoskrnl.exe`; walks `ActiveProcessLinks`; lowers protection only after a matching PID and verifies the write |
+| **KillEngine.cpp** | Owns one dual-driver session, batches the PPL update, sends the terminator request, verifies process exit, and applies the user-mode fallback only to rejected kernel requests |
+| **ProcessKiller.cpp** | `CreateToolhelp32Snapshot` enumeration; `IsProcessRunning` via `WaitForSingleObject`; terminator handshake and kill IOCTL; `RestoreProcess` / `RestoreProcesses` |
+| **ProcessOperations.cpp** | `KillOnceThreadProc` / `RestoreThreadProc` worker threads; `WorkerGuard` RAII; IFEO offline hive editing; GUI kill sequencing and status updates |
 | **ConfigReader.cpp** | HKCU registry CRUD: target list (REG_MULTI_SZ), path cache (REG_SZ per process), history ring buffer (REG_MULTI_SZ, max 16); `ReadSeedProcessList` from RCDATA with 3-way BOM detection |
 | **ListViewManager.cpp** | `InitListView`, `RefreshProcessList`, `HandleListCustomDraw`, `HandleListRowClick`; sort dispatch; row flag bit management; IFEO cold-start check for PARALYZED state persistence |
 | **UIHelpers.cpp** | `CreateUiFont` (DPI-aware), `AppUseDarkMode`, `ApplyModernWindowEffects` (Mica, rounded corners), `CalculateMainLayout`, `LayoutMainWindow`, `UpdateStatusText`, `UpdateProcessCount` |
-| **CLIHandler.cpp** | `SetupConsole` (`AttachConsole` + fd re-open + `_setmode`); `SendEnterToConsole` (`WriteConsoleInputW` VK_RETURN injection); `PrintHelp`; `RunCLI` dispatcher; `InitDriverForCli` thin wrapper |
+| **CLIHandler.cpp** | `SetupConsole`, `SendEnterToConsole`, `PrintHelp`, `RunCLI`, the `-check-drivers` diagnostic, and command-specific driver lifecycle |
 | **GlobalData.cpp** | Definitions for all globals: window/GDI handles, sort state, `g_statusLock`, `g_lastActionByName`, `g_prevRunningByName`, `g_shutdownPending` (atomic bool), `g_activeWorkers` (atomic int), `WMU_*` message IDs |
 | **Utils.cpp** | `LoadStr` (string resource helper), `GetWindowsVersion`, `IsRunningAsAdmin`, `EnsureExeName`, `StripExeExtension` |
 
@@ -631,68 +688,73 @@ directly from the registry; the embedded resource is used only to rebuild defaul
 .\build.ps1 -Clean
 ```
 
-`build.ps1` locates MSBuild via hardcoded VS 2026 paths or `vswhere`, removes transient
-directories (`.vs`, `obj`, `x64`, `src\obj`, `src\x64`), builds
-`src\KvcKiller.vcxproj` with `/p:Configuration=Release;Platform=x64 /m`, and sets the
-output file's `CreationTime` and `LastWriteTime` to **2030-01-01 00:00:00**. This deterministic
-timestamp prevents compile-time attribution during forensic analysis — the binary cannot be
-dated by filesystem metadata.
+`build.ps1` locates MSBuild through `vswhere`, then a version-sorted filesystem fallback. It
+stages `rsc\driver1.sys` and `rsc\driver2.sys`, creates one deterministic LZX Cabinet, appends
+it to the base icon, generates `src\GenIconSize.h`, removes transient build directories,
+builds `src\KvcKiller.vcxproj`, and stamps the executable to **2030-01-01 00:00:00**.
 
 | Setting | Value |
 |---------|-------|
 | **Toolset** | Visual Studio 2026 (v145) |
-| **Standard** | C++20 |
+| **Standard** | C++23 |
 | **Architecture** | x64 only |
 | **CRT** | Static (`/MT`) — no VC++ Redistributable needed |
 | **External DLLs** | None |
 | **Output** | `bin\KvcKiller.exe` |
 | **File timestamps** | Forced to 2030-01-01 00:00:00 (anti-forensic, deterministic builds) |
+| **Kernel payload** | `driver1` + `driver2` in one LZX:21 Cabinet at the generated ICO offset |
 
 ---
 
-## The Driver — CVE-2023-52271
+## Kernel Components
 
-The kernel driver used is **wsftprm.sys** (product: `wsddprm`, version 2.0.0.0), the kernel
-component of **Topaz Warsaw** — banking antifraud software developed by the Brazilian company
-Topaz OFD and deployed on customer machines by banks across Brazil. The driver
-carries a valid Authenticode signature from a trusted CA, which is the only reason
-`NtLoadDriver` accepts it without a DSE bypass on a stock Windows 10/11 installation.
+KvcKiller now uses two independently signed kernel components. This replaces the previous
+single-driver `wsftprm.sys` path.
 
-**CVE-2023-52271** (published 2023, patched by Topaz on 2023-10-10) describes a vulnerability
-in wsftprm.sys v2.0.0.0: the driver exposes device `\\.\Warsaw_PM` to any process on the
-system and implements an IOCTL handler at code `0x22201C` that calls `ZwTerminateProcess`
-in kernel context without any privilege validation. Any process that can open the device can
-terminate any other process — including Protected Process Light (PPL) processes such as
-Windows Defender on a fully patched, HVCI-enabled, Secure Boot system.
+**Driver 1: PPL unprotector.** The image exposes `\\.\RTCore64` and two 48-byte memory
+requests:
 
-CVSS v3.1 score: **6.5** (Medium) — the scoring reflects a low-privilege attacker; from an
-Administrator context the impact is unconditional.
+| IOCTL | Purpose |
+|-------|---------|
+| `0x80002048` | read `DWORD` from a kernel virtual address |
+| `0x8000204C` | write a byte to a kernel virtual address |
 
-The driver is **not on Microsoft's vulnerable driver blocklist** as of this writing, making it
-usable via `NtLoadDriver` without any kernel integrity bypass.
+The user-mode layer resolves the current kernel base and the relevant `EPROCESS` offsets from
+`ntoskrnl.exe`, finds each selected PID in the process list, and clears only the protection
+byte. It reads the value back before the kill phase proceeds.
 
-Should this driver be blacklisted, I maintain a private collection of 30+ alternative vulnerable drivers, many discovered through manual research. I am prepared to refactor the core to implement multiple fallback chains and obfuscation layers. The goal is simple: ensuring Windows Defender can be neutralized when it hinders productivity—because nothing contradicts Windows 11’s 'green energy' claims more than wasting CPU cycles and user time on sluggish I/O operations involving thousands of small files.
+**Driver 2: process terminator.** The K7 image exposes `\\.\DosK7RKScnDrv`. It requires
+`HKLM\SOFTWARE\Wow6432Node\K7 Computing\K7TotalSecurity\DirProductBase` to contain the
+caller's executable directory.
 
-**BYOVD deployment:** KvcKiller extracts the kernel driver into
-`System32\DriverStore\FileRepository`, masquerading as a legitimate network adapter component
-(`netadapter.sys`). It dynamically scans for the correct version-specific subfolder
-(`netadapter.inf_amd64_*`) to blend into the OS structure. The driver is loaded via
-`NtLoadDriver`, performs the kill operation via IOCTL `0x22201C`, and is immediately unloaded
-with full cleanup of file and registry artifacts.
+| IOCTL | Purpose |
+|-------|---------|
+| `0x00222008` | handshake: input `0x77777777`, expected output `1` |
+| `0x00222018` | terminate process: input PID `DWORD`, output kernel `NTSTATUS` |
 
-### IOCTL Details
+Both images pass Authenticode validation in the current build. They are registered as
+demand-start services from extensionless files, opened as separate device handles, and
+removed after the session.
 
-Input buffer: 1036 bytes — target PID as `DWORD` in the first 4 bytes, 1032 bytes
-zero-padding required by the driver's dispatch routine. No output buffer. The driver invokes
-`ZwTerminateProcess` from ring 0, bypassing all user-space self-protection callbacks and
-`PROCESS_TERMINATE` handle restrictions enforced by PPL.
+### Termination Details
+
+The PPL phase completes for the whole selected PID batch before driver 2 receives its first
+request. Driver 2 is initialized with a magic handshake, not just a successful `CreateFile`.
+A normal kill records every PID that was running when the action started and succeeds when
+all of those original PID instances are gone. If a service such as `WinDefend` starts a new
+`MsMpEng` process with a different PID, the one-shot kill is still a success and the restart
+is reported separately. With `-paralyze`, success additionally requires active IFEO traps
+and no restarted process. If driver 2 rejects the request or does not terminate the process
+within the wait window, KvcKiller tries `TerminateProcess` against the now-unprotected handle
+before reporting failure.
 
 ### Privilege Requirements
 
 | Operation | Required privilege |
 |-----------|--------------------|
 | Load / unload kernel driver | `SeLoadDriverPrivilege` |
-| Write driver to DriverStore | TrustedInstaller impersonation |
+| Stage driver files in `System32\drivers` | elevated Administrator token |
+| Write temporary K7 caller-path value | elevated Administrator token |
 | Save IFEO hive (`RegSaveKeyEx`) | `SE_BACKUP_NAME` |
 | Restore IFEO hive (`RegRestoreKey`) | `SE_RESTORE_NAME` |
 | Query process image path | `PROCESS_QUERY_LIMITED_INFORMATION` |
@@ -702,11 +764,12 @@ All privileges are available to a standard Administrator-elevated process on Win
 ### What KvcKiller Does Not Do
 
 - Does not disable DSE or patch kernel callbacks
-- Does not write to memory of other processes
+- Writes one byte in the target `EPROCESS` protection field; it does not patch kernel code
+- Does not leave either driver service registered after the operation
 - Does not install persistent services, scheduled tasks, or startup entries
 - Does not make network connections
 - Does not exfiltrate or store credentials
-- The kernel driver is unloaded and its registry key cleaned up after every Kill operation
+- Restores a pre-existing K7 `DirProductBase` value instead of assuming the key belongs to it
 
 ---
 
@@ -838,7 +901,7 @@ guarantees and Windows API capabilities:
 | **Privileges** | Administrator (elevated token) |
 | **Architecture** | x64 |
 | **Dependencies** | None — static CRT, no VC++ Redistributable |
-| **Compiler** | Visual Studio 2026 (v145), C++20 (build only) |
+| **Compiler** | Visual Studio 2026 (v145), C++23 (build only) |
 
 ---
 

@@ -10,12 +10,18 @@
 #include "Utils.h"
 #include "UIHelpers.h"
 #include "ListViewManager.h"
-#include "DriverController.h"
+#include "KillEngine.h"
 #include "ProcessKiller.h"
 #include "ConfigReader.h"
 #include "Resource.h"
 
+#include <algorithm>
+#include <memory>
+#include <ranges>
 #include <set>
+#include <string_view>
+#include <tlhelp32.h>
+#include <unordered_set>
 #include <vector>
 #include <iostream>
 
@@ -189,14 +195,142 @@ static int ProcessBatchIfeo(const std::vector<std::wstring>& processNames, bool 
     return successCount;
 }
 
+bool StopServiceAndWait(std::wstring_view serviceName, DWORD timeoutMs) {
+    SC_HANDLE scm = OpenSCManagerW(
+        nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return false;
+
+    const std::wstring name(serviceName);
+    SC_HANDLE queryService = OpenServiceW(
+        scm, name.c_str(), SERVICE_QUERY_STATUS);
+    if (!queryService) {
+        CloseServiceHandle(scm);
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD needed = 0;
+    auto query = [&] {
+        return QueryServiceStatusEx(
+            queryService, SC_STATUS_PROCESS_INFO,
+            reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed);
+    };
+
+    bool stopped = false;
+    if (query() && status.dwCurrentState == SERVICE_STOPPED) {
+        stopped = true;
+    } else {
+        // SERVICE_QUERY_STATUS may be granted while SERVICE_STOP is denied by
+        // a protected service. Request stop rights only when actually needed.
+        SC_HANDLE stopService = OpenServiceW(
+            scm, name.c_str(), SERVICE_STOP | SERVICE_QUERY_STATUS);
+        if (stopService) {
+            SERVICE_STATUS controlStatus{};
+            ControlService(stopService, SERVICE_CONTROL_STOP, &controlStatus);
+            CloseServiceHandle(stopService);
+        }
+
+        const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+        while (GetTickCount64() < deadline) {
+            if (query() && status.dwCurrentState == SERVICE_STOPPED) {
+                stopped = true;
+                break;
+            }
+            Sleep(100);
+        }
+    }
+
+    CloseServiceHandle(queryService);
+    CloseServiceHandle(scm);
+    return stopped;
+}
+
+std::unordered_set<DWORD> SnapshotProcessIds() {
+    std::unordered_set<DWORD> pids;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return pids;
+
+    PROCESSENTRY32W entry{sizeof(entry)};
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            pids.insert(entry.th32ProcessID);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return pids;
+}
+
+bool WaitForInitialPidsToDisappear(
+    const std::vector<KillTargetReport>& targets,
+    DWORD timeoutMs) {
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    while (true) {
+        const auto livePids = SnapshotProcessIds();
+        const bool anyInitialPidAlive = std::ranges::any_of(
+            targets, [&livePids](const KillTargetReport& target) {
+                return std::ranges::any_of(
+                    target.initialPids,
+                    [&livePids](DWORD pid) {
+                        return livePids.contains(pid);
+                    });
+            });
+        if (!anyInitialPidAlive) return true;
+        if (GetTickCount64() >= deadline) return false;
+        Sleep(100);
+    }
+}
+
+KillTargetReport* FindTargetReport(
+    std::vector<KillTargetReport>& targets, std::wstring_view processName) {
+    const std::wstring key = NormalizeProcessKey(std::wstring(processName));
+    const auto found = std::find_if(
+        targets.begin(), targets.end(),
+        [&key](const KillTargetReport& target) {
+            return NormalizeProcessKey(target.name) == key;
+        });
+    return found == targets.end() ? nullptr : &*found;
+}
+
+bool AllTrapsSet(const std::vector<KillTargetReport>& targets) {
+    return std::ranges::all_of(
+        targets, [](const KillTargetReport& target) {
+            return target.trapSet;
+        });
+}
+
+bool AnyTerminated(const std::vector<KillTargetReport>& targets) {
+    return std::ranges::any_of(
+        targets, [](const KillTargetReport& target) {
+            return target.terminated;
+        });
+}
+
+bool AnyRunningAfter(const std::vector<KillTargetReport>& targets) {
+    return std::ranges::any_of(
+        targets, [](const KillTargetReport& target) {
+            return target.runningAfter;
+        });
+}
+
+bool AnyOriginalSurvived(const std::vector<KillTargetReport>& targets) {
+    return std::ranges::any_of(
+        targets, [](const KillTargetReport& target) {
+            return target.originalSurvived;
+        });
+}
+
 // ---------------------------------------------------------------------------
 // Kill thread parameter block
 // ---------------------------------------------------------------------------
 
-// Carries UI state from KillOnceAction (UI thread) to KillOnceThreadProc.
-// Reading BM_GETCHECK here avoids a cross-thread SendMessage in the worker.
 struct KillThreadParams {
-    bool paralyze; // true if the Paralyze checkbox was ticked when Kill was clicked
+    std::vector<std::wstring> targets;
+    bool paralyze = false;
+    bool defenderSet = false;
+};
+
+struct RestoreThreadParams {
+    std::vector<std::wstring> targets;
 };
 
 // ---------------------------------------------------------------------------
@@ -245,20 +379,175 @@ bool IsProcessParalyzed(const std::wstring& processName) {
     return false;
 }
 
+std::vector<std::wstring> DefenderTargetList() {
+    std::vector<std::wstring> targets;
+    targets.reserve(kDefenderTargets.size());
+    for (const std::wstring_view target : kDefenderTargets) {
+        targets.emplace_back(target);
+    }
+    return targets;
+}
+
+KillOperationReport ExecuteKillTargets(
+    std::span<const std::wstring> targets,
+    bool paralyzeFirst,
+    bool defenderSet) {
+    KillOperationReport report{};
+    report.defenderSet = defenderSet;
+    report.targets.reserve(targets.size());
+
+    std::vector<std::wstring> normalizedTargets;
+    std::vector<std::wstring> exeNames;
+    normalizedTargets.reserve(targets.size());
+    exeNames.reserve(targets.size());
+    for (const std::wstring& target : targets) {
+        KillTargetReport item{};
+        item.name = StripExeExtension(target);
+        report.targets.push_back(std::move(item));
+        normalizedTargets.push_back(report.targets.back().name);
+        exeNames.push_back(report.targets.back().name + L".exe");
+    }
+
+    const auto initialRunning = ProcessKiller::FindProcesses(exeNames);
+    if (!paralyzeFirst && initialRunning.empty()) {
+        report.outcome = KillOutcome::AlreadyStopped;
+        return report;
+    }
+
+    if (!KillEngine::Start()) {
+        report.outcome = KillOutcome::Failed;
+        return report;
+    }
+
+    report.pplReady = KillEngine::HasPplUnprotector();
+    report.terminatorReady = KillEngine::HasProcessTerminator();
+
+    if (paralyzeFirst) {
+        ParalyzeProcessesBatch(normalizedTargets);
+        for (KillTargetReport& target : report.targets) {
+            target.trapSet = IsProcessParalyzed(target.name);
+        }
+    }
+
+    const auto running = ProcessKiller::FindProcesses(exeNames);
+    std::vector<DWORD> pids;
+    pids.reserve(running.size());
+    for (const ProcessInfo& process : running) {
+        if (KillTargetReport* target = FindTargetReport(
+                report.targets, process.name)) {
+            if (target->initialPids.empty()) target->pid = process.pid;
+            target->initialPids.push_back(process.pid);
+            target->wasRunning = true;
+        }
+        pids.push_back(process.pid);
+    }
+
+    if (!pids.empty() && report.pplReady) {
+        std::vector<PplTargetResult> protection;
+        KillEngine::LowerProtection(pids, protection);
+    }
+
+    for (const ProcessInfo& process : running) {
+        const KillAttemptResult attempt = KillEngine::Kill(process.pid);
+        if (KillTargetReport* target = FindTargetReport(
+                report.targets, process.name)) {
+            target->terminated = target->terminated || attempt.terminated;
+        }
+    }
+
+    WaitForInitialPidsToDisappear(report.targets, 3000);
+
+    if (defenderSet) {
+        report.winDefendStopped = StopServiceAndWait(L"WinDefend", 6000);
+        report.securityHealthStopped =
+            StopServiceAndWait(L"SecurityHealthService", 4000);
+    }
+
+    const auto livePids = SnapshotProcessIds();
+    for (KillTargetReport& target : report.targets) {
+        const bool initialPidAlive = std::ranges::any_of(
+            target.initialPids, [&livePids](DWORD pid) {
+                return livePids.contains(pid);
+            });
+        if (target.wasRunning && !initialPidAlive) {
+            target.terminated = true;
+        }
+        target.originalSurvived = initialPidAlive;
+    }
+
+    const auto finalRunning = ProcessKiller::FindProcesses(exeNames);
+    for (const ProcessInfo& process : finalRunning) {
+        if (!livePids.contains(process.pid)
+            || !ProcessKiller::IsProcessRunning(process.pid)) {
+            continue;
+        }
+        if (KillTargetReport* target = FindTargetReport(
+                report.targets, process.name)) {
+            target->runningAfter = true;
+            const bool sameProcess = std::ranges::contains(
+                target->initialPids, process.pid);
+            target->originalSurvived =
+                target->originalSurvived || sameProcess;
+            target->restartedAfter =
+                target->restartedAfter || !sameProcess;
+        }
+    }
+
+    KillEngine::Stop();
+
+    if (defenderSet) {
+        const KillTargetReport* mainEngine = FindTargetReport(
+            report.targets, L"MsMpEng");
+        const bool mainEngineStopped =
+            mainEngine && !mainEngine->runningAfter;
+        const bool trapsComplete =
+            !paralyzeFirst || AllTrapsSet(report.targets);
+        const bool complete =
+            trapsComplete
+            && report.winDefendStopped
+            && mainEngineStopped;
+
+        if (complete) {
+            report.outcome = KillOutcome::Succeeded;
+        } else if (report.winDefendStopped
+                   || mainEngineStopped
+                   || AnyTerminated(report.targets)) {
+            report.outcome = KillOutcome::Partial;
+        } else {
+            report.outcome = KillOutcome::Failed;
+        }
+        return report;
+    }
+
+    const bool anyInitialTarget =
+        std::ranges::any_of(report.targets, [](const KillTargetReport& target) {
+            return target.wasRunning;
+        });
+    const bool allInitialTargetsTerminated =
+        anyInitialTarget && !AnyOriginalSurvived(report.targets);
+    const bool trappedWithoutRestart =
+        paralyzeFirst
+        && AllTrapsSet(report.targets)
+        && !AnyRunningAfter(report.targets);
+
+    if ((!paralyzeFirst && allInitialTargetsTerminated)
+        || trappedWithoutRestart) {
+        report.outcome = KillOutcome::Succeeded;
+    } else if (AnyTerminated(report.targets)
+               || (paralyzeFirst && AllTrapsSet(report.targets))) {
+        report.outcome = KillOutcome::Partial;
+    } else {
+        report.outcome = KillOutcome::Failed;
+    }
+    return report;
+}
+
 // ---------------------------------------------------------------------------
 // Driver lifecycle
 // ---------------------------------------------------------------------------
 
-// Ensures the kernel driver is loaded and ready to accept IOCTLs.
-// Called at the start of every Kill action before opening the driver handle.
-// Idempotent: returns true immediately if the driver is already loaded.
 bool InitializeDriver() {
-    if (DriverController::IsDriverLoaded()) return true;
-
-    const std::wstring driverPath = DriverController::GetDriverPath();
-    if (!DriverController::RegisterDriver(driverPath)) return false;
-    if (!DriverController::StartDriver())              return false;
-    return true;
+    return KillEngine::Start();
 }
 
 // ---------------------------------------------------------------------------
@@ -271,103 +560,63 @@ bool InitializeDriver() {
 DWORD WINAPI KillOnceThreadProc(LPVOID lpParam) {
     WorkerGuard guard{};
 
-    // Claim the params block allocated by KillOnceAction on the UI thread.
-    bool paralyzeEnabled = false;
-    if (lpParam) {
-        auto* p     = static_cast<KillThreadParams*>(lpParam);
-        paralyzeEnabled = p->paralyze;
-        delete p;
-    }
-
-    // If the selection is empty, restore the UI state and exit cleanly.
-    auto selected = GetSelectedProcesses();
-    if (selected.empty()) {
+    std::unique_ptr<KillThreadParams> request(
+        static_cast<KillThreadParams*>(lpParam));
+    if (!request || request->targets.empty()) {
         if (!g_shutdownPending.load()) UpdateStatusText(LoadStr(IDS_STATUS_READY));
         SetButtonsEnabled(true);
-        DriverController::CloseDriverHandle();
-        DriverController::CleanupDriverRegistry();
         return 0;
     }
 
-    HANDLE hDriver = DriverController::GetDriverHandle();
-    if (hDriver == INVALID_HANDLE_VALUE) {
-        if (!g_shutdownPending.load()) UpdateStatusText(LoadStr(IDS_STATUS_DRIVER_ERR));
-        SetButtonsEnabled(true);
-        DriverController::CleanupDriverRegistry();
-        return 0;
-    }
+    const std::vector<std::wstring>& targets = request->targets;
 
-    // Build the .exe name list for FindProcesses.
-    std::vector<std::wstring> exeNames;
-    for (const auto& name : selected) exeNames.push_back(name + L".exe");
+    const KillOperationReport report = ExecuteKillTargets(
+        targets, request->paralyze, request->defenderSet);
 
-    auto running = ProcessKiller::FindProcesses(exeNames);
-    if (running.empty()) {
-        // All selected processes were already dead.
-        UpdateStatusText(LoadStr(IDS_STATUS_ALREADY_DEAD));
-        SetButtonsEnabled(true);
-    } else {
-        int killedCount       = 0;
-        int failedCount       = 0;
-        int paralyzeFailCount = 0;
-
-        std::vector<std::wstring> killedNames; // names without .exe, for batch paralyze
-
-        for (const auto& proc : running) {
-            HANDLE hProc = OpenProcess(SYNCHRONIZE, FALSE, proc.pid);
-            if (ProcessKiller::KillProcess(hDriver, proc.pid)) {
-                if (hProc) {
-                    // Await asynchronous termination (up to 2 seconds)
-                    WaitForSingleObject(hProc, 2000);
-                }
-                if (!ProcessKiller::IsProcessRunning(proc.pid)) {
-                    ++killedCount;
-                    StoreLastAction(proc.name, kActionKilled);
-                    const std::wstring path = ConfigReader::ReadProcessPath(proc.name);
-                    ConfigReader::RecordHistory(L"KILL", proc.name, path);
-                    // proc.name is always "foo.exe" (lower-cased by FindProcesses)
-                    killedNames.push_back(proc.name.substr(0, proc.name.size() - 4));
-                } else {
-                    // IOCTL sent but process survived — likely protected.
-                    ++failedCount;
-                }
-            } else {
-                // DeviceIoControl itself failed.
-                ++failedCount;
-            }
-            if (hProc) {
-                CloseHandle(hProc);
-            }
+    for (const KillTargetReport& target : report.targets) {
+        if (target.trapSet) {
+            StoreLastAction(target.name, kActionParalyzed);
+        } else if (target.terminated) {
+            StoreLastAction(target.name, kActionKilled);
+        } else if (report.defenderSet && target.runningAfter) {
+            StoreLastAction(target.name, kActionNone);
         }
 
-        if (paralyzeEnabled && !killedNames.empty()) {
-            int paralyzed     = ParalyzeProcessesBatch(killedNames);
-            paralyzeFailCount = static_cast<int>(killedNames.size()) - paralyzed;
-            // Promote KILLED → PARALYZED for processes where IFEO was set.
-            // killedNames are already normalized (lowercase, no .exe).
-            for (int i = 0; i < paralyzed; ++i)
-                StoreLastAction(killedNames[i], kActionParalyzed);
+        if (target.terminated) {
+            ConfigReader::RecordHistory(
+                L"KILL",
+                target.name + L".exe",
+                ConfigReader::ReadProcessPath(target.name));
         }
-
-        // Update the status label based on outcome.
-        // Skip UI updates if the window is already being destroyed.
-        if (g_shutdownPending.load()) {
-            // window gone — skip all UI updates
-        } else if (killedCount > 0 && failedCount == 0 && paralyzeFailCount == 0)
-            UpdateStatusText(LoadStr(IDS_STATUS_KILL_ALL_OK));
-        else if (killedCount > 0)
-            UpdateStatusText(LoadStr(IDS_STATUS_KILL_PARTIAL));
-        else
-            UpdateStatusText(LoadStr(IDS_STATUS_KILL_FAILED));
-
-        if (!g_shutdownPending.load()) PostMessage(hInstMain, WMU_REFRESH_LIST, 0, 0);
-        SetButtonsEnabled(true);
     }
 
-    // Always release the driver handle and clean up registry traces after the
-    // operation, even on failure paths.
-    DriverController::CloseDriverHandle();
-    DriverController::CleanupDriverRegistry();
+    if (!g_shutdownPending.load()) {
+        if (report.outcome == KillOutcome::Failed
+            && !report.pplReady
+            && !report.terminatorReady) {
+            UpdateStatusText(LoadStr(IDS_STATUS_DRIVER_ERR));
+        } else {
+            switch (report.outcome) {
+            case KillOutcome::Succeeded:
+                UpdateStatusText(LoadStr(IDS_STATUS_KILL_ALL_OK));
+                break;
+            case KillOutcome::Partial:
+                UpdateStatusText(LoadStr(IDS_STATUS_KILL_PARTIAL));
+                break;
+            case KillOutcome::AlreadyStopped:
+                UpdateStatusText(LoadStr(
+                    report.defenderSet
+                        ? IDS_STATUS_KILL_ALL_OK
+                        : IDS_STATUS_ALREADY_DEAD));
+                break;
+            case KillOutcome::Failed:
+                UpdateStatusText(LoadStr(IDS_STATUS_KILL_FAILED));
+                break;
+            }
+        }
+        PostMessage(hInstMain, WMU_REFRESH_LIST, 0, 0);
+    }
+    SetButtonsEnabled(true);
     return 0;
 }
 
@@ -377,15 +626,17 @@ DWORD WINAPI KillOnceThreadProc(LPVOID lpParam) {
 
 // Runs on a private thread; unparalyzes and starts each selected process.
 // WorkerGuard ensures the active-worker count is decremented on all exits.
-DWORD WINAPI RestoreThreadProc(LPVOID) {
+DWORD WINAPI RestoreThreadProc(LPVOID lpParam) {
     WorkerGuard guard{};
 
-    auto selected = GetSelectedProcesses();
-    if (selected.empty()) {
+    std::unique_ptr<RestoreThreadParams> request(
+        static_cast<RestoreThreadParams*>(lpParam));
+    if (!request || request->targets.empty()) {
         UpdateStatusText(LoadStr(IDS_STATUS_READY));
         SetButtonsEnabled(true);
         return 0;
     }
+    const std::vector<std::wstring>& selected = request->targets;
 
     // Identify which selected processes are already running (result code 2 later).
     std::vector<std::wstring> exeNames;
@@ -466,62 +717,88 @@ DWORD WINAPI RestoreThreadProc(LPVOID) {
 // GUI action triggers  (called from WM_COMMAND on the UI thread)
 // ---------------------------------------------------------------------------
 
-// Initiates a kill operation.  All blocking work happens in KillOnceThreadProc.
-//
-// The Paralyze checkbox state is read here on the UI thread and passed via
-// KillThreadParams so the worker never needs to call SendMessage across threads
-// (which would be a deadlock if the UI thread is blocked waiting for the worker).
-//
-// g_activeWorkers is incremented BEFORE CreateThread so that WM_CLOSE on the
-// UI thread immediately sees a non-zero count and defers DestroyWindow.
-void KillOnceAction() {
-    if (g_shutdownPending.load()) return;
+namespace {
+
+bool RequireElevation() {
+    if (g_shutdownPending.load()) return false;
     if (!IsRunningAsAdmin()) {
         MessageBoxW(nullptr, LoadStr(IDS_ERR_NEED_ADMIN).c_str(),
                     LoadStr(IDS_ERR_CAPTION).c_str(), MB_ICONERROR);
+        return false;
+    }
+    return true;
+}
+
+void StartKillWorker(std::vector<std::wstring> targets, bool paralyze,
+                     bool defenderSet, UINT statusMessage) {
+    if (targets.empty()) {
+        UpdateStatusText(LoadStr(IDS_STATUS_READY));
         return;
     }
-    if (!InitializeDriver()) return;
 
-    UpdateStatusText(LoadStr(IDS_STATUS_KILLING));
-    EnableWindow(hKillOnceButton, FALSE);
-    EnableWindow(hRestoreButton,  FALSE);
+    UpdateStatusText(LoadStr(statusMessage));
+    SetButtonsEnabled(false);
 
-    auto* params = new KillThreadParams{
-        SendMessageW(hParalyzeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED
-    };
+    auto params = std::make_unique<KillThreadParams>();
+    params->targets = std::move(targets);
+    params->paralyze = paralyze;
+    params->defenderSet = defenderSet;
 
-    // Increment before CreateThread — see threading model note at top of file.
     g_activeWorkers.fetch_add(1);
-    HANDLE hThread = CreateThread(nullptr, 0, KillOnceThreadProc, params, 0, nullptr);
+    HANDLE hThread = CreateThread(
+        nullptr, 0, KillOnceThreadProc, params.get(), 0, nullptr);
     if (hThread) {
-        CloseHandle(hThread); // we don't need to join — WorkerGuard handles cleanup
+        params.release();
+        CloseHandle(hThread);
     } else {
-        delete params;
-        NotifyWorkerDone(); // thread never started — balance the increment
+        SetButtonsEnabled(true);
+        NotifyWorkerDone();
     }
 }
 
+} // namespace
+
+void KillOnceAction() {
+    if (!RequireElevation()) return;
+
+    StartKillWorker(
+        GetSelectedProcesses(),
+        SendMessageW(hParalyzeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        false,
+        IDS_STATUS_KILLING);
+}
+
+void KillDefenderAction() {
+    if (!RequireElevation()) return;
+
+    StartKillWorker(
+        DefenderTargetList(),
+        true,
+        true,
+        IDS_STATUS_KILLING_DEFENDER);
+}
+
 // Initiates a restore operation.  All blocking work happens in RestoreThreadProc.
-// No params struct needed — the worker reads the selection list itself via
-// GetSelectedProcesses (which only accesses g_visibleRows, not cross-thread UI state).
 void RestoreAction() {
-    if (g_shutdownPending.load()) return;
-    if (!IsRunningAsAdmin()) {
-        MessageBoxW(nullptr, LoadStr(IDS_ERR_NEED_ADMIN).c_str(),
-                    LoadStr(IDS_ERR_CAPTION).c_str(), MB_ICONERROR);
-        return;
-    }
+    if (!RequireElevation()) return;
+
+    auto targets = GetSelectedProcesses();
+    if (targets.empty()) targets = DefenderTargetList();
 
     UpdateStatusText(LoadStr(IDS_STATUS_RESTORING_SVC));
     SetButtonsEnabled(false);
 
-    // Increment before CreateThread — same reasoning as KillOnceAction.
+    auto params = std::make_unique<RestoreThreadParams>();
+    params->targets = std::move(targets);
+
     g_activeWorkers.fetch_add(1);
-    HANDLE hThread = CreateThread(nullptr, 0, RestoreThreadProc, nullptr, 0, nullptr);
+    HANDLE hThread = CreateThread(
+        nullptr, 0, RestoreThreadProc, params.get(), 0, nullptr);
     if (hThread) {
+        params.release();
         CloseHandle(hThread);
     } else {
-        NotifyWorkerDone(); // thread never started — balance the increment
+        SetButtonsEnabled(true);
+        NotifyWorkerDone();
     }
 }

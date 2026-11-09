@@ -28,6 +28,7 @@ HWND       hHideInactiveBuiltInCheck= nullptr;  // "Hide inactive built-in" chec
 HWND       hParalyzeCheck           = nullptr;  // "Paralyze" bare checkbox square
 HWND       hParalyzeLabel           = nullptr;  // SS_NOTIFY STATIC acting as the paralyze label
 HWND       hKillOnceButton          = nullptr;  // Kill action button
+HWND       hKillDefenderButton      = nullptr;  // Fixed three-process Defender action
 HWND       hRestoreButton           = nullptr;  // Restore action button
 HWND       hStatusText              = nullptr;  // Status line below the buttons
 HWND       hProcessCount            = nullptr;  // "Targets: N | Running: M" info label

