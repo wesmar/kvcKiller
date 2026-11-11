@@ -149,23 +149,23 @@ arguments. No separate CLI binary.
 
 ```mermaid
 flowchart TD
-    A[WinMain] --> B{argc > 1?}
-    B -->|Yes| C[RunCLI]
-    B -->|No| D[WndProc / GUI]
-    D --> E[ListViewManager]
-    D --> F[ProcessOperations]
-    D --> G[UIHelpers]
-    F --> H[KillEngine]
-    H --> I[PplUnprotector]
-    H --> J[ProcessKiller]
-    H --> K[DriverController]
-    K --> L[DriverPackage / in-memory FDI]
-    I --> M[Driver 1: EPROCESS unprotect]
-    J --> N[Driver 2: handshake and kill IOCTL]
-    F --> R[ConfigReader]
-    F --> O[IFEO offline edit]
-    O --> P[RegSaveKeyEx / RegLoadKey]
-    O --> Q[RegRestoreKey]
+    A["WinMain"] --> B{"argc > 1?"}
+    B -->|Yes| C["RunCLI"]
+    B -->|No| D["WndProc / GUI"]
+    D --> E["ListViewManager"]
+    D --> F["ProcessOperations"]
+    D --> G["UIHelpers"]
+    F --> H["KillEngine"]
+    H --> I["PplUnprotector"]
+    H --> J["ProcessKiller"]
+    H --> K["DriverController"]
+    K --> L["DriverPackage / in-memory FDI"]
+    I --> M["Driver 1: EPROCESS unprotect"]
+    J --> N["Driver 2: handshake and kill IOCTL"]
+    F --> R["ConfigReader"]
+    F --> O["IFEO offline edit"]
+    O --> P["RegSaveKeyEx / RegLoadKey"]
+    O --> Q["RegRestoreKey"]
     C --> H
     C --> J
     C --> R
