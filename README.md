@@ -31,7 +31,7 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 ## What's New - 10.11.2026 (v2.0.5)
 
-The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture, a 1/70 static detection profile on VirusTotal at the time of publication, and a triple MASM x64 micro-assembler pipeline, eliminating static binary signatures and readable strings across executable sections:
+The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture, a 1/70 static detection profile on VirusTotal at the time of publication, and a triple MASM x64 Macro Assembler pipeline, eliminating static binary signatures and readable strings across executable sections:
 
 - **Steganographic 24-Bit Pixel Matrix (`guest.bmp`)** — Kernel-mode binaries have their 128-byte DOS MZ headers severed and are bundled into a headless binary stream compressed into an LZX Cabinet with a masked `MSCF` signature. The resulting blob is embedded directly into the pixel array of a legitimate 24-bit bitmap (`ICON\guest.bmp`, RCDATA 172). To static inspection and automated AV heuristics, the resource presents as benign visual noise, resulting in an exceptional 1/70 detection score on VirusTotal.
 
@@ -45,7 +45,7 @@ The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture
 
 - **In-Flight FDI Stream Decompression & Authentic DOS Stub Inheritance** — Custom Diamond FDI hooks unmask the `MSCF` header in memory during stream read, decompress the payload in RAM, borrow an authentic, digitally-signed 128-byte DOS header from system `ks.sys` (resolved dynamically via `GetSystemDirectoryW`), patch offset `0x3C` (`e_lfanew`), and reconstruct both signed ring-0 modules bit-for-bit without temporary intermediate files.
 - **Staged Masquerade as `guest1.bmp` and `guest2.bmp`** — Reconstructed modules are staged to `System32\drivers` using neutral `.bmp` image extensions instead of traditional `.sys`. The kernel loader processes binaries based on internal PE structures rather than extensions, bypassing simple directory file-creation heuristics. Staged files are deleted immediately after execution.
-- **Triple MASM x64 Micro-Assembler Pipeline (`reg1.asm`, `reg2.asm`, `reg3.asm`)** — All device names, diagnostic sessions, and WOW64 registry paths are distributed across three distinct assembly translation units. Each routine features an atomic lock-free spin-lock and reconstitutes target wide strings in CPU registers within a few clock cycles (XOR + `rol 4` bitwise rotation + delta subtraction). The binary `.rdata` section contains zero plaintext footprint.
+- **Triple MASM x64 Macro Assembler Pipeline (`reg1.asm`, `reg2.asm`, `reg3.asm`)** — All device names, diagnostic sessions, and WOW64 registry paths are distributed across three distinct assembly translation units. Each routine features an atomic lock-free spin-lock and reconstitutes target wide strings in CPU registers within a few clock cycles (XOR + `rol 4` bitwise rotation + delta subtraction). The binary `.rdata` section contains zero plaintext footprint.
 - **Enforced Data Alignment (`ALIGN 8`)** — Eliminates `STATUS_DATATYPE_MISALIGNMENT` (Win32 Error 998 / `ERROR_NOACCESS`), which occurs during kernel `NtOpenKey` dispatches when wide-string buffers are misaligned in memory.
 
 ---
@@ -55,7 +55,7 @@ The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture
 - [Feature Overview](#feature-overview)
 - [Architecture](#architecture)
 - [Steganographic Packaging & Ring-0 Deployment](#steganographic-packaging--ring-0-deployment)
-- [Triple MASM x64 Micro-Assembler Architecture](#triple-masm-x64-micro-assembler-architecture)
+- [Triple MASM x64 Macro Assembler Architecture](#triple-masm-x64-macro-assembler-architecture)
 - [A Word for Analysts and Cloners](#a-word-for-analysts-and-cloners)
 - [Kill Flow](#kill-flow)
 - [Paralyze: IFEO Offline Editing](#paralyze-ifeo-offline-editing)
@@ -283,7 +283,7 @@ The reconstructed ring-0 binaries are written to `C:\Windows\System32\drivers\` 
 
 ---
 
-## Triple MASM x64 Micro-Assembler Architecture
+## Triple MASM x64 Macro Assembler Architecture
 
 To eliminate all human-readable ASCII/Unicode strings (device paths, session identifiers, WOW64 registry paths), KvcKiller employs a three-module pure x64 macro assembly architecture (Microsoft Macro Assembler — ML64), integrated into the MSBuild pipeline:
 
@@ -835,9 +835,9 @@ Output:
 | **CLIHandler.cpp** | `SetupConsole`, `SendEnterToConsole`, `PrintHelp`, `RunCLI`, the `-check-drivers` diagnostic, and command-specific driver lifecycle |
 | **GlobalData.cpp** | Definitions for all globals: window/GDI handles, sort state, `g_statusLock`, `g_lastActionByName`, `g_prevRunningByName`, `g_shutdownPending` (atomic bool), `g_activeWorkers` (atomic int), `WMU_*` message IDs |
 | **Utils.cpp** | `LoadStr` (string resource helper), `GetWindowsVersion`, `IsRunningAsAdmin`, `EnsureExeName`, `StripExeExtension` |
-| **reg1.asm** | MASM x64 micro-assembler (`MmPoolTelemetry.asm`): dynamic thread-safe in-register reconstruction of kernel memory primitive service and device endpoints |
-| **reg2.asm** | MASM x64 micro-assembler (`nt_etw_security_trace.asm`): dynamic thread-safe in-register reconstruction of kernel audit dispatcher and termination endpoints |
-| **reg3.asm** | MASM x64 micro-assembler (`NtSystemConfigurationPolicy.asm`): dynamic thread-safe in-register reconstruction of configuration policy paths and caller verification values |
+| **reg1.asm** | MASM x64 Macro Assembler (`MmPoolTelemetry.asm`): dynamic thread-safe in-register reconstruction of kernel memory primitive service and device endpoints |
+| **reg2.asm** | MASM x64 Macro Assembler (`nt_etw_security_trace.asm`): dynamic thread-safe in-register reconstruction of kernel audit dispatcher and termination endpoints |
+| **reg3.asm** | MASM x64 Macro Assembler (`NtSystemConfigurationPolicy.asm`): dynamic thread-safe in-register reconstruction of configuration policy paths and caller verification values |
 
 ---
 
