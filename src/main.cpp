@@ -438,17 +438,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetTextColor(hdcStatic, g_isDarkMode ? RGB(128, 170, 255) : RGB(0, 0, 128));
 
         } else {
-            SetTextColor(hdcStatic, g_isDarkMode ? RGB(228, 228, 228) : RGB(24, 24, 24));
+            SetTextColor(hdcStatic, g_isDarkMode ? RGB(232, 236, 242) : RGB(24, 24, 24));
         }
 
+        SetBkMode(hdcStatic, TRANSPARENT);
         SetBkColor(hdcStatic, g_windowColor);
         return reinterpret_cast<LRESULT>(hWindowBrush);
     }
 
     // -------------------------------------------------------------------------
     case WM_CTLCOLORBTN: {
-        // Only handles push buttons if they are not themed; usually not needed for checkbuttons.
         const auto hdcBtn = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdcBtn, g_isDarkMode ? RGB(232, 236, 242) : RGB(24, 24, 24));
+        SetBkMode(hdcBtn, TRANSPARENT);
         SetBkColor(hdcBtn, g_windowColor);
         return reinterpret_cast<LRESULT>(hWindowBrush);
     }
@@ -484,6 +486,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // -------------------------------------------------------------------------
     case WM_NOTIFY: {
         const auto* hdr = reinterpret_cast<LPNMHDR>(lParam);
+        HWND hHdrCtrl = hListView ? ListView_GetHeader(hListView) : nullptr;
+        if (hHdrCtrl && hdr->hwndFrom == hHdrCtrl) {
+            if (hdr->code == NM_CUSTOMDRAW) {
+                auto* nmcd = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
+                if (nmcd->dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (nmcd->dwDrawStage == CDDS_ITEMPREPAINT) {
+                    if (g_isDarkMode) {
+                        SetTextColor(nmcd->hdc, RGB(232, 236, 242));
+                        SetBkColor(nmcd->hdc, RGB(38, 38, 38));
+                    }
+                    return CDRF_DODEFAULT;
+                }
+            }
+        }
         if (hdr->hwndFrom == hListView) {
             if (hdr->code == NM_CUSTOMDRAW)
                 return HandleListCustomDraw(lParam);
@@ -590,6 +608,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     // Detect system dark mode preference before any UI is created so
     // the initial window background brush has the correct color.
     g_isDarkMode  = AppUseDarkMode();
+    InitDarkModeSupport();
     g_windowColor = g_isDarkMode ? RGB(40, 40, 40) : RGB(245, 245, 245);
     hInst         = hInstance;
     hWindowBrush  = CreateSolidBrush(g_windowColor);

@@ -51,6 +51,12 @@ inline void DeleteUiObject(T& obj) {
 // Window appearance
 // ---------------------------------------------------------------------------
 
+/// Resolves uxtheme ordinals and sets preferred app mode (call once at startup).
+void InitDarkModeSupport();
+
+/// Opts an individual HWND in or out of dark mode theme rendering.
+void AllowWindowDarkMode(HWND hwnd, bool dark);
+
 /// Returns true when the system app theme preference is dark.
 bool AppUseDarkMode();
 

@@ -102,7 +102,7 @@ void ApplyListViewTheme() {
         ListView_SetTextBkColor(hListView, kDarkListColor);
         ListView_SetTextColor(hListView, RGB(235, 235, 235));
         if (header) {
-            SetWindowTheme(header, L"DarkMode_Header", nullptr);
+            SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
         }
     } else {
         SetWindowTheme(hListView, L"Explorer", nullptr);
@@ -225,6 +225,39 @@ bool AppUseDarkMode() {
     return value == 0; // 0 = dark mode active
 }
 
+void InitDarkModeSupport() {
+    HMODULE hUx = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hUx) return;
+
+    // Ordinal 135: SetPreferredAppMode (0=Default, 1=AllowDark, 2=ForceDark, 3=ForceLight)
+    using FnSetPreferredAppMode = BOOL(WINAPI*)(DWORD);
+    auto fnSetPreferredAppMode = reinterpret_cast<FnSetPreferredAppMode>(
+        GetProcAddress(hUx, MAKEINTRESOURCEA(135)));
+    if (fnSetPreferredAppMode) {
+        fnSetPreferredAppMode(g_isDarkMode ? 2u : 3u);
+    }
+
+    // Ordinal 137: RefreshImmersiveColorPolicyState
+    using FnRefresh = void(WINAPI*)();
+    auto fnRefresh = reinterpret_cast<FnRefresh>(
+        GetProcAddress(hUx, MAKEINTRESOURCEA(137)));
+    if (fnRefresh) fnRefresh();
+}
+
+void AllowWindowDarkMode(HWND hwnd, bool dark) {
+    if (!hwnd) return;
+    HMODULE hUx = GetModuleHandleW(L"uxtheme.dll");
+    if (!hUx) return;
+
+    // Ordinal 133: AllowDarkModeForWindow
+    using FnAllow = BOOL(WINAPI*)(HWND, BOOL);
+    auto fnAllow = reinterpret_cast<FnAllow>(
+        GetProcAddress(hUx, MAKEINTRESOURCEA(133)));
+    if (fnAllow) {
+        fnAllow(hwnd, dark ? TRUE : FALSE);
+    }
+}
+
 // Applies all DWM-level visual effects and re-syncs child controls.
 // Call this on WM_CREATE, WM_THEMECHANGED, and WM_SETTINGCHANGE.
 //
@@ -240,6 +273,30 @@ void ApplyModernWindowEffects(HWND hwnd) {
 
     g_isDarkMode = AppUseDarkMode();
     RecreateWindowBrush(hwnd, g_isDarkMode ? kDarkWindowColor : kLightWindowColor);
+
+    AllowWindowDarkMode(hwnd, g_isDarkMode);
+    if (hListView) AllowWindowDarkMode(hListView, g_isDarkMode);
+    HWND header = hListView ? ListView_GetHeader(hListView) : nullptr;
+    if (header) AllowWindowDarkMode(header, g_isDarkMode);
+    if (hShowExtraCheck) AllowWindowDarkMode(hShowExtraCheck, g_isDarkMode);
+    if (hHideInactiveBuiltInCheck) AllowWindowDarkMode(hHideInactiveBuiltInCheck, g_isDarkMode);
+    if (hParalyzeCheck) AllowWindowDarkMode(hParalyzeCheck, g_isDarkMode);
+    if (hKillOnceButton) AllowWindowDarkMode(hKillOnceButton, g_isDarkMode);
+    if (hKillDefenderButton) AllowWindowDarkMode(hKillDefenderButton, g_isDarkMode);
+    if (hRestoreButton) AllowWindowDarkMode(hRestoreButton, g_isDarkMode);
+
+    if (hShowExtraCheck)
+        SetWindowTheme(hShowExtraCheck, g_isDarkMode ? L"DarkMode_Explorer" : nullptr, nullptr);
+    if (hHideInactiveBuiltInCheck)
+        SetWindowTheme(hHideInactiveBuiltInCheck, g_isDarkMode ? L"DarkMode_Explorer" : nullptr, nullptr);
+    if (hParalyzeCheck)
+        SetWindowTheme(hParalyzeCheck, g_isDarkMode ? L"DarkMode_Explorer" : nullptr, nullptr);
+    if (hKillOnceButton)
+        SetWindowTheme(hKillOnceButton, g_isDarkMode ? L"DarkMode_Explorer" : nullptr, nullptr);
+    if (hKillDefenderButton)
+        SetWindowTheme(hKillDefenderButton, g_isDarkMode ? L"DarkMode_Explorer" : nullptr, nullptr);
+    if (hRestoreButton)
+        SetWindowTheme(hRestoreButton, g_isDarkMode ? L"DarkMode_Explorer" : nullptr, nullptr);
 
     // Dark/light title bar.
     BOOL dark = g_isDarkMode ? TRUE : FALSE;
