@@ -11,9 +11,7 @@
 #include "Utils.h"
 #include "GlobalData.h"
 #include "Resource.h"
-
-#include <algorithm>
-#include <cwctype>
+#include "StrUtils.h"
 
 // ---------------------------------------------------------------------------
 // String resources
@@ -22,10 +20,10 @@
 // Loads a string from the module's embedded STRINGTABLE resource.
 // The 512-character buffer is large enough for all UI strings in practice;
 // truncation is silently accepted (LoadStringW null-terminates on overflow).
-std::wstring LoadStr(UINT id) {
+WString LoadStr(UINT id) {
     wchar_t buf[512] = {};
-    LoadStringW(GetModuleHandleW(nullptr), id, buf, static_cast<int>(std::size(buf)));
-    return buf;
+    LoadStringW(GetModuleHandleW(nullptr), id, buf, static_cast<int>(sizeof(buf) / sizeof(buf[0])));
+    return WString(buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +48,7 @@ bool IsWindows11OrLater() {
                                      reinterpret_cast<LPBYTE>(build), &dwSize) == ERROR_SUCCESS;
     RegCloseKey(hKey);
     // Build 22000 is the first Windows 11 release (21H2).
-    return ok && _wtoi(build) >= 22000;
+    return ok && StrUtils::StrToUint(build) >= 22000;
 }
 
 // Returns true if the current process token has membership in the local
@@ -79,19 +77,20 @@ bool IsRunningAsAdmin() {
 // String helpers
 // ---------------------------------------------------------------------------
 
-// Returns a lowercase copy of value using the wide-character towlower function.
+// Returns a lowercase copy of value using StrUtils::CharLowerW.
 // Used for case-insensitive key normalization throughout the codebase.
-std::wstring ToLowerCopy(std::wstring value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-        [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+WString ToLowerCopy(WString value) {
+    for (size_t i = 0; i < value.size(); ++i) {
+        value[i] = StrUtils::CharLowerW(value[i]);
+    }
     return value;
 }
 
 // Removes a trailing ".exe" suffix (case-insensitive) from value.
 // Input and output preserve the original case of the non-suffix characters.
 // Example: "MsMpEng.EXE" → "MsMpEng"
-std::wstring StripExeExtension(const std::wstring& value) {
-    std::wstring lower = ToLowerCopy(value);
+WString StripExeExtension(const WString& value) {
+    WString lower = ToLowerCopy(value);
     if (lower.length() > 4 && lower.substr(lower.length() - 4) == L".exe")
         return value.substr(0, value.length() - 4);
     return value;
@@ -100,23 +99,23 @@ std::wstring StripExeExtension(const std::wstring& value) {
 // Ensures value ends with ".exe", adding the suffix if it is missing.
 // Always lower-cases the extension for consistency.
 // Example: "MsMpEng" → "MsMpEng.exe"
-std::wstring EnsureExeName(const std::wstring& value) {
+WString EnsureExeName(const WString& value) {
     return StripExeExtension(value) + L".exe";
 }
 
 // Produces the canonical map key for a process: lowercase, no .exe extension.
 // All g_lastActionByName / g_prevRunningByName lookups use this key so that
 // "MsMpEng.exe", "msmpeng.EXE", and "MsMpEng" all map to the same entry.
-std::wstring NormalizeProcessKey(const std::wstring& value) {
+WString NormalizeProcessKey(const WString& value) {
     return ToLowerCopy(StripExeExtension(value));
 }
 
 // Returns pid formatted as a decimal string, or "-" for PID 0 (not running).
-std::wstring FormatPid(DWORD pid) {
-    if (pid == 0) return L"-";
+WString FormatPid(DWORD pid) {
+    if (pid == 0) return WString(L"-");
     wchar_t buffer[32];
-    swprintf_s(buffer, L"%lu", pid);
-    return buffer;
+    StrUtils::UintToStr(pid, buffer, sizeof(buffer) / sizeof(buffer[0]));
+    return WString(buffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +131,8 @@ std::wstring FormatPid(DWORD pid) {
 // Stores (or clears) the last user-visible action label for a process.
 // Passing kActionNone or an empty string removes the entry so ReadLastAction
 // returns kActionNone without a map hit.
-void StoreLastAction(const std::wstring& processName, const std::wstring& action) {
-    const std::wstring key = NormalizeProcessKey(processName);
+void StoreLastAction(const WString& processName, const WString& action) {
+    const WString key = NormalizeProcessKey(processName);
     if (key.empty()) return;
 
     EnterCriticalSection(&g_statusLock);
@@ -146,12 +145,12 @@ void StoreLastAction(const std::wstring& processName, const std::wstring& action
 
 // Returns the last stored action label for a process, or kActionNone if no
 // entry exists.
-std::wstring ReadLastAction(const std::wstring& processName) {
-    const std::wstring key = NormalizeProcessKey(processName);
+WString ReadLastAction(const WString& processName) {
+    const WString key = NormalizeProcessKey(processName);
 
     EnterCriticalSection(&g_statusLock);
     const auto it = g_lastActionByName.find(key);
-    const std::wstring action = (it != g_lastActionByName.end()) ? it->second : kActionNone;
+    const WString action = (it != g_lastActionByName.end()) ? it->second : WString(kActionNone);
     LeaveCriticalSection(&g_statusLock);
     return action;
 }
@@ -161,8 +160,8 @@ std::wstring ReadLastAction(const std::wstring& processName) {
 //   not-running → running  = "restarted"
 //   running → not-running  = clears pending "restored" label
 // Returns false if no prior state has been recorded (first tick).
-bool WasRunningPreviously(const std::wstring& processName) {
-    const std::wstring key = NormalizeProcessKey(processName);
+bool WasRunningPreviously(const WString& processName) {
+    const WString key = NormalizeProcessKey(processName);
 
     EnterCriticalSection(&g_statusLock);
     const auto it = g_prevRunningByName.find(key);
@@ -173,8 +172,8 @@ bool WasRunningPreviously(const std::wstring& processName) {
 
 // Records the current running state for comparison on the next refresh tick.
 // Called at the end of each row's processing in RefreshProcessList.
-void StoreRunningState(const std::wstring& processName, bool running) {
-    const std::wstring key = NormalizeProcessKey(processName);
+void StoreRunningState(const WString& processName, bool running) {
+    const WString key = NormalizeProcessKey(processName);
     if (key.empty()) return;
 
     EnterCriticalSection(&g_statusLock);

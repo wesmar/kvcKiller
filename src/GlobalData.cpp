@@ -65,16 +65,16 @@ bool g_sortAscending = true;
 // InitializeCriticalSection; intentionally NOT deleted in WM_DESTROY because
 // a worker thread that passed the g_shutdownPending check may still be inside
 // a critical section at exit time.  The OS reclaims all resources on process exit.
-CRITICAL_SECTION                     g_statusLock;
+CRITICAL_SECTION         g_statusLock;
 
 // Last stored action label for each normalized process key (e.g. "msmpeng").
 // Entries are removed when the action is kActionNone or empty.
-std::map<std::wstring, std::wstring> g_lastActionByName;
+Map<WString, WString> g_lastActionByName;
 
 // Last-known running state per process, updated each RefreshProcessList tick.
 // Used by the action-label state machine to detect transitions (e.g. not-running
 // → running = "restarted").
-std::map<std::wstring, bool>         g_prevRunningByName;
+Map<WString, bool>    g_prevRunningByName;
 
 // ---------------------------------------------------------------------------
 // Shutdown coordination

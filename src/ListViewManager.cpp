@@ -14,14 +14,13 @@
 #include "Resource.h"
 #include "UIHelpers.h"
 #include "ProcessOperations.h"
+#include "StrUtils.h"
+#include "KvcContainers.h"
 
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <tlhelp32.h>
 #include <windowsx.h>
-#include <map>
-#include <set>
-#include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
@@ -33,7 +32,7 @@
 // Mirrors the rows currently visible in the ListView, in display order.
 // Kept in sync by ApplyRowsToListView; consumed by GetSelectedProcesses
 // and HandleListRowClick to avoid repeated ListView_GetItemText calls.
-static std::vector<UiProcessRow> g_visibleRows;
+static Vector<UiProcessRow> g_visibleRows;
 
 // ---------------------------------------------------------------------------
 // Internal: process enumeration helpers
@@ -53,15 +52,15 @@ static bool IsInactiveBuiltInHidden() {
 
 // Strips the directory prefix from a full path and returns the bare filename
 // without the .exe extension (used as the display name for extra/live rows).
-static std::wstring ExtractDisplayNameFromPath(const std::wstring& fullPath) {
+static WString ExtractDisplayNameFromPath(const WString& fullPath) {
     const size_t slash = fullPath.find_last_of(L"\\/");
-    const std::wstring fileName = (slash == std::wstring::npos) ? fullPath : fullPath.substr(slash + 1);
+    const WString fileName = (slash == WString::npos) ? fullPath : fullPath.substr(slash + 1);
     return StripExeExtension(fileName);
 }
 
 // Returns true if a process has a Debugger set in IFEO,
 // meaning the process was previously "paralyzed" and not yet restored.
-static bool HasParalyzedBackup(const std::wstring& processName) {
+static bool HasParalyzedBackup(const WString& processName) {
     return IsProcessParalyzed(processName);
 }
 
@@ -69,8 +68,8 @@ static bool HasParalyzedBackup(const std::wstring& processName) {
 // keyed by normalized name (lowercase, no extension).  Only the first entry
 // per key is kept — if multiple instances exist, the lowest-PID one wins
 // because Process32First/Next enumerates in ascending PID order.
-static std::map<std::wstring, ProcessInfo> EnumerateAllRunningProcesses() {
-    std::map<std::wstring, ProcessInfo> running;
+static Map<WString, ProcessInfo> EnumerateAllRunningProcesses() {
+    Map<WString, ProcessInfo> running;
 
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) return running;
@@ -79,13 +78,12 @@ static std::map<std::wstring, ProcessInfo> EnumerateAllRunningProcesses() {
     pe.dwSize = sizeof(pe);
     if (Process32FirstW(hSnapshot, &pe)) {
         do {
-            std::wstring displayName = StripExeExtension(pe.szExeFile);
-            std::wstring key         = NormalizeProcessKey(displayName);
+            WString displayName = StripExeExtension(WString(pe.szExeFile));
+            WString key         = NormalizeProcessKey(displayName);
             if (key.empty() || running.contains(key)) continue;
             running[key] = ProcessInfo{ pe.th32ProcessID, displayName, true };
         } while (Process32NextW(hSnapshot, &pe));
     }
-
     CloseHandle(hSnapshot);
     return running;
 }
@@ -98,16 +96,16 @@ static std::map<std::wstring, ProcessInfo> EnumerateAllRunningProcesses() {
 // NM_CUSTOMDRAW can color rows without another map lookup per paint cycle.
 static LPARAM BuildRowFlags(const UiProcessRow& row) {
     LPARAM flags = 0;
-    if (row.running)                           flags |= kRowFlagRunning;
-    if (row.extra)                             flags |= kRowFlagExtra;
-    if (row.lastAction == kActionKilled)       flags |= kRowFlagKilled;
-    if (row.lastAction == kActionParalyzed)    flags |= kRowFlagParalyzed;
-    if (row.lastAction == kActionRestored)     flags |= kRowFlagRestored;
-    if (row.lastAction == kActionRestarted)    flags |= kRowFlagRestarted;
+    if (row.running)                        flags |= kRowFlagRunning;
+    if (row.extra)                          flags |= kRowFlagExtra;
+    if (row.lastAction == kActionKilled)    flags |= kRowFlagKilled;
+    if (row.lastAction == kActionParalyzed) flags |= kRowFlagParalyzed;
+    if (row.lastAction == kActionRestored)  flags |= kRowFlagRestored;
+    if (row.lastAction == kActionRestarted) flags |= kRowFlagRestarted;
     return flags;
 }
 
-// Inserts a brand-new row at rowIndex.  Sets all five sub-items in one pass.
+// Inserts a brand-new row at rowIndex. Sets all five sub-items in one pass.
 // INDEXTOSTATEIMAGEMASK(1) = unchecked, INDEXTOSTATEIMAGEMASK(2) = checked.
 static void InsertProcessRow(int rowIndex, const UiProcessRow& row) {
     LVITEMW item{};
@@ -119,9 +117,9 @@ static void InsertProcessRow(int rowIndex, const UiProcessRow& row) {
     item.state     = INDEXTOSTATEIMAGEMASK(row.checked ? 2 : 1);
     ListView_InsertItem(hListView, &item);
 
-    std::wstring pidText    = FormatPid(row.pid);
-    std::wstring statusText = row.running ? kStatusRunning : kStatusNotRunning;
-    const wchar_t* srcText  = row.predefined ? kSourceReg : (row.extra ? kActionLive : kSourceSaved);
+    WString pidText    = FormatPid(row.pid);
+    WString statusText = row.running ? kStatusRunning : kStatusNotRunning;
+    const wchar_t* srcText = row.predefined ? kSourceReg : (row.extra ? kActionLive : kSourceSaved);
 
     ListView_SetItemText(hListView, rowIndex, 1, const_cast<LPWSTR>(srcText));
     ListView_SetItemText(hListView, rowIndex, 2, const_cast<LPWSTR>(pidText.c_str()));
@@ -141,8 +139,8 @@ static void UpdateProcessRow(int rowIndex, const UiProcessRow& row) {
     item.state     = INDEXTOSTATEIMAGEMASK(row.checked ? 2 : 1);
     ListView_SetItem(hListView, &item);
 
-    std::wstring pidText    = FormatPid(row.pid);
-    std::wstring statusText = row.running ? kStatusRunning : kStatusNotRunning;
+    WString pidText    = FormatPid(row.pid);
+    WString statusText = row.running ? kStatusRunning : kStatusNotRunning;
 
     ListView_SetItemText(hListView, rowIndex, 0, const_cast<LPWSTR>(row.displayName.c_str()));
     ListView_SetItemText(hListView, rowIndex, 1,
@@ -157,23 +155,23 @@ static void UpdateProcessRow(int rowIndex, const UiProcessRow& row) {
 // ---------------------------------------------------------------------------
 
 // Walks the current ListView and records which items are checked, keyed by
-// normalized process name.  Called before rebuilding the row list so that
+// normalized process name. Called before rebuilding the row list so that
 // user selections survive a full refresh.
-static std::map<std::wstring, bool> CaptureCheckedStates() {
-    std::map<std::wstring, bool> checked;
+static Map<WString, bool> CaptureCheckedStates() {
+    Map<WString, bool> checked;
     if (!hListView) return checked;
 
     const int itemCount = ListView_GetItemCount(hListView);
     for (int i = 0; i < itemCount; ++i) {
-        std::wstring key;
+        WString key;
         // Prefer the cached g_visibleRows entry; fall back to asking the
         // control itself (happens during the very first refresh).
         if (i < static_cast<int>(g_visibleRows.size())) {
             key = g_visibleRows[i].normalizedKey;
         } else {
             wchar_t buffer[260]{};
-            ListView_GetItemText(hListView, i, 0, buffer, static_cast<int>(std::size(buffer)));
-            key = NormalizeProcessKey(buffer);
+            ListView_GetItemText(hListView, i, 0, buffer, static_cast<int>(sizeof(buffer) / sizeof(buffer[0])));
+            key = NormalizeProcessKey(WString(buffer));
         }
         checked[key] = ListView_GetCheckState(hListView, i) != FALSE;
     }
@@ -185,9 +183,18 @@ static std::map<std::wstring, bool> CaptureCheckedStates() {
 // ---------------------------------------------------------------------------
 
 // Case-insensitive wide-string comparison returning -1 / 0 / +1.
-static int CompareInsensitive(const std::wstring& left, const std::wstring& right) {
-    const int v = _wcsicmp(left.c_str(), right.c_str());
-    return v < 0 ? -1 : v > 0 ? 1 : 0;
+static int CompareInsensitive(const WString& left, const WString& right) {
+    const wchar_t* a = left.c_str();
+    const wchar_t* b = right.c_str();
+    while (*a && *b) {
+        wchar_t ca = StrUtils::CharLowerW(*a);
+        wchar_t cb = StrUtils::CharLowerW(*b);
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+        ++a; ++b;
+    }
+    if (*a) return 1;
+    if (*b) return -1;
+    return 0;
 }
 
 // Generic ascending comparison for any ordered type, returning -1 / 0 / +1.
@@ -212,7 +219,7 @@ static int CompareNaturalRowOrder(const UiProcessRow& left, const UiProcessRow& 
     return CompareInsensitive(left.lastAction, right.lastAction);
 }
 
-// Column-header sort comparison.  Column indices match the ListView columns:
+// Column-header sort comparison. Column indices match the ListView columns:
 //   0 = Name, 1 = Source (predefined vs. not), 2 = PID,
 //   3 = Status (running bool), 4 = Last Action.
 static int CompareSortedColumn(const UiProcessRow& left, const UiProcessRow& right) {
@@ -226,7 +233,7 @@ static int CompareSortedColumn(const UiProcessRow& left, const UiProcessRow& rig
     }
 }
 
-// Full sort predicate used by std::stable_sort.
+// Full sort predicate used by StableSort.
 // Rule 1: predefined rows always sit above live-extra rows regardless of
 //         the active column sort (keeps config targets visually grouped).
 // Rule 2: within a tier, apply the column sort, then natural order as a
@@ -253,17 +260,17 @@ static bool IsRowLess(const UiProcessRow& left, const UiProcessRow& right) {
 // ---------------------------------------------------------------------------
 
 // Finds the first row whose normalizedKey matches. Returns -1 if not found.
-static int FindRowIndexByKey(const std::vector<UiProcessRow>& rows, const std::wstring& key) {
+static int FindRowIndexByKey(const Vector<UiProcessRow>& rows, const WString& key) {
     for (int i = 0; i < static_cast<int>(rows.size()); ++i)
         if (rows[i].normalizedKey == key) return i;
     return -1;
 }
 
-// Saves the normalized keys of the top-visible and selected rows before
-// a rebuild so we can scroll back to the same logical position afterward.
+// Records the scroll position (top-visible row) and selection before the list
+// is rebuilt so they can be restored afterwards, preventing jarring jumps.
 static ListViewState CaptureListViewState() {
     ListViewState state;
-    if (!hListView || g_visibleRows.empty()) return state;
+    if (!hListView) return state;
 
     const int topIndex = ListView_GetTopIndex(hListView);
     if (topIndex >= 0 && topIndex < static_cast<int>(g_visibleRows.size()))
@@ -276,12 +283,9 @@ static ListViewState CaptureListViewState() {
     return state;
 }
 
-// Re-applies the previously captured scroll/selection state to the (possibly
-// reordered) rows vector.  Uses ListView_Scroll to align the view to the
-// correct pixel row since ListView_EnsureVisible only guarantees visibility,
-// not the exact top-of-viewport position.
+// Restores the selection and scroll position recorded before the refresh.
 static void RestoreListViewState(const ListViewState& state,
-                                 const std::vector<UiProcessRow>& rows) {
+                                 const Vector<UiProcessRow>& rows) {
     if (!hListView) return;
 
     // Clear all selections first to avoid stale highlights.
@@ -313,16 +317,16 @@ static void RestoreListViewState(const ListViewState& state,
     }
 }
 
-// Efficiently diffs the current ListView contents against \p rows,
+// Efficiently diffs the current ListView contents against rows,
 // updating / inserting / deleting items as needed, then restores focus.
 // WM_SETREDRAW suppression eliminates the visible repaint during the diff.
-static void ApplyRowsToListView(const std::vector<UiProcessRow>& rows) {
+static void ApplyRowsToListView(const Vector<UiProcessRow>& rows) {
     const ListViewState state = CaptureListViewState();
     SendMessageW(hListView, WM_SETREDRAW, FALSE, 0);
 
     const int currentCount = ListView_GetItemCount(hListView);
     // Rows that exist in both old and new lists → update in place (no flicker).
-    const int sharedCount  = min(currentCount, static_cast<int>(rows.size()));
+    const int sharedCount  = (currentCount < static_cast<int>(rows.size())) ? currentCount : static_cast<int>(rows.size());
 
     for (int i = 0; i < sharedCount; ++i)
         UpdateProcessRow(i, rows[i]);
@@ -331,7 +335,7 @@ static void ApplyRowsToListView(const std::vector<UiProcessRow>& rows) {
     for (int i = sharedCount; i < static_cast<int>(rows.size()); ++i)
         InsertProcessRow(i, rows[i]);
 
-    // Remove stale tail rows.  Always delete from the end to avoid index
+    // Remove stale tail rows. Always delete from the end to avoid index
     // shifting invalidating the loop counter.
     while (ListView_GetItemCount(hListView) > static_cast<int>(rows.size()))
         ListView_DeleteItem(hListView, ListView_GetItemCount(hListView) - 1);
@@ -353,11 +357,11 @@ void InitListView() {
     LVCOLUMNW lvc = {};
     lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
 
-    const std::wstring sColName       = LoadStr(IDS_COL_PROCESS_NAME);
-    const std::wstring sColSource     = LoadStr(IDS_COL_SOURCE);
-    const std::wstring sColPid        = LoadStr(IDS_COL_PID);
-    const std::wstring sColStatus     = LoadStr(IDS_COL_STATUS);
-    const std::wstring sColLastAction = LoadStr(IDS_COL_LAST_ACTION);
+    const WString sColName       = LoadStr(IDS_COL_PROCESS_NAME);
+    const WString sColSource     = LoadStr(IDS_COL_SOURCE);
+    const WString sColPid        = LoadStr(IDS_COL_PID);
+    const WString sColStatus     = LoadStr(IDS_COL_STATUS);
+    const WString sColLastAction = LoadStr(IDS_COL_LAST_ACTION);
 
     // Widths here are placeholders; LayoutMainWindow overrides them on first paint.
     lvc.iSubItem = 0; lvc.pszText = const_cast<LPWSTR>(sColName.c_str());       lvc.cx = kColNameMinCx;    ListView_InsertColumn(hListView, 0, &lvc);
@@ -377,49 +381,39 @@ void InitListView() {
 
 // Main refresh entry point, called on the 2-second timer and after any
 // user action (kill / restore / checkbox toggle / column header click).
-//
-// Pipeline:
-//   1. Read config → build target set.
-//   2. Snapshot running processes via toolhelp.
-//   3. Restore previously saved checkbox states.
-//   4. Build UiProcessRow list: predefined targets first, then known-path
-//      non-built-ins (with .bak or stored action), then optionally all live
-//      processes as "extra" rows.
-//   5. Compute action-label transitions (killed→restarted, restored→none, etc.).
-//   6. Sort and diff-apply to the ListView.
 void RefreshProcessList() {
     auto processNames = ConfigReader::ReadProcessList();
     const bool hideInactiveBuiltIn = IsInactiveBuiltInHidden();
     const auto knownPaths = ConfigReader::ReadKnownProcessPaths();
     const auto allRunning = EnumerateAllRunningProcesses();
 
-    std::vector<std::wstring> exeNames;
-    std::set<std::wstring> targetKeys;
-    for (const auto& name : processNames) {
-        exeNames.push_back(name + L".exe");
-        targetKeys.insert(NormalizeProcessKey(name));
+    Vector<WString> exeNames;
+    Set<WString> targetKeys;
+    for (size_t i = 0; i < processNames.size(); ++i) {
+        exeNames.push_back(processNames[i] + L".exe");
+        targetKeys.insert(NormalizeProcessKey(processNames[i]));
     }
 
     // Build a deduplicated running-targets map (first match wins per key).
     auto running = ProcessKiller::FindProcesses(exeNames);
-    std::map<std::wstring, ProcessInfo> runningTargets;
-    for (const auto& proc : running) {
-        const std::wstring key = NormalizeProcessKey(proc.name);
-        if (!runningTargets.contains(key)) runningTargets[key] = proc;
+    Map<WString, ProcessInfo> runningTargets;
+    for (size_t i = 0; i < running.size(); ++i) {
+        WString key = NormalizeProcessKey(running[i].name);
+        if (!runningTargets.contains(key)) runningTargets[key] = running[i];
     }
 
     const auto checkedStates = CaptureCheckedStates();
-    std::vector<UiProcessRow> rows;
+    Vector<UiProcessRow> rows;
     rows.reserve(processNames.size() + 64);
-    std::set<std::wstring> visibleKeys; // tracks which keys already have a row
+    Set<WString> visibleKeys; // tracks which keys already have a row
 
     int runningCount = 0;
 
     // --- Pass 1: predefined config targets ---
     for (int i = 0; i < static_cast<int>(processNames.size()); ++i) {
-        const auto& name             = processNames[i];
-        const std::wstring canonical = StripExeExtension(name);
-        const std::wstring key       = NormalizeProcessKey(canonical);
+        const auto& name        = processNames[i];
+        const WString canonical = StripExeExtension(name);
+        const WString key       = NormalizeProcessKey(canonical);
 
         UiProcessRow row;
         row.canonicalName   = canonical;
@@ -490,10 +484,11 @@ void RefreshProcessList() {
 
     // --- Pass 2: non-built-in processes that the user previously interacted with ---
     // These come from ConfigReader::ReadKnownProcessPaths() (persisted after
-    // a kill/restore).  Show them as long as a .bak backup exists or a stored
+    // a kill/restore). Show them as long as a .bak backup exists or a stored
     // action label remains — they may need manual restoration.
-    for (const auto& entry : knownPaths) {
-        const std::wstring key = NormalizeProcessKey(entry.processName);
+    for (size_t i = 0; i < knownPaths.size(); ++i) {
+        const auto& entry = knownPaths[i];
+        const WString key = NormalizeProcessKey(entry.processName);
         if (key.empty() || targetKeys.contains(key) || visibleKeys.contains(key)) {
             continue;
         }
@@ -561,11 +556,11 @@ void RefreshProcessList() {
 
     // --- Pass 3: optional "extra" rows — every other running process ---
     // Only appended when the "Show extra processes" checkbox is on.
-    // These rows are purely informational; they carry kActionLive as label
-    // and kRowFlagExtra for the blue tint in custom draw.
     int extraCount = 0;
     if (IsExtraViewEnabled()) {
-        for (const auto& [key, proc] : allRunning) {
+        for (const auto& pair : allRunning) {
+            const WString& key = pair.first;
+            const ProcessInfo& proc = pair.second;
             if (targetKeys.contains(key) || visibleKeys.contains(key)) continue;
 
             UiProcessRow row;
@@ -587,28 +582,24 @@ void RefreshProcessList() {
         }
     }
 
-    std::stable_sort(rows.begin(), rows.end(), IsRowLess);
+    StableSort(rows.begin(), rows.end(), IsRowLess);
     ApplyRowsToListView(rows);
     UpdateProcessCount(static_cast<int>(processNames.size()), runningCount, extraCount);
 }
 
-// Returns the canonicalName of every checked row (respects the cached
-// g_visibleRows so we don't have to round-trip through ListView_GetItemText).
-std::vector<std::wstring> GetSelectedProcesses() {
-    std::vector<std::wstring> selected;
-    const int count = min(ListView_GetItemCount(hListView),
-                          static_cast<int>(g_visibleRows.size()));
+// Returns the canonicalName of every checked row.
+Vector<WString> GetSelectedProcesses() {
+    Vector<WString> selected;
+    const int lvCount = ListView_GetItemCount(hListView);
+    const int vrCount = static_cast<int>(g_visibleRows.size());
+    const int count = (lvCount < vrCount) ? lvCount : vrCount;
     for (int i = 0; i < count; ++i)
         if (ListView_GetCheckState(hListView, i))
             selected.push_back(g_visibleRows[i].canonicalName);
     return selected;
 }
 
-// Handles NM_CLICK on the ListView.  We intercept clicks ourselves instead of
-// relying on LVS_EX_CHECKBOXES auto-toggle because we also need to keep
-// g_visibleRows.checked in sync without an extra round-trip to the control.
-// Returns true if a row item (non-checkbox area) was clicked and the
-// checkbox was toggled; false otherwise (caller may do default processing).
+// Handles NM_CLICK on the ListView.
 bool HandleListRowClick() {
     if (!hListView) {
         return false;
@@ -618,26 +609,20 @@ bool HandleListRowClick() {
     POINT pt{ GET_X_LPARAM(pos), GET_Y_LPARAM(pos) };
     ScreenToClient(hListView, &pt);
 
-    LVHITTESTINFO hit{};
-    hit.pt = pt;
-    const int index = ListView_SubItemHitTest(hListView, &hit);
-    if (index < 0) {
+    LVHITTESTINFO hti{};
+    hti.pt = pt;
+    const int itemIndex = ListView_SubItemHitTest(hListView, &hti);
+
+    if (itemIndex < 0 || (hti.flags & LVHT_ONITEMSTATEICON)) {
         return false;
     }
 
-    // Only react to clicks on the item text / icon area, not the checkbox
-    // image itself (LVHT_ONITEMSTATEICON) — the checkbox already toggles
-    // natively for that zone.
-    if ((hit.flags & LVHT_ONITEM) == 0 || (hit.flags & LVHT_ONITEMSTATEICON) != 0) {
-        return false;
-    }
+    const BOOL currentState = ListView_GetCheckState(hListView, itemIndex);
+    const BOOL newState     = !currentState;
+    ListView_SetCheckState(hListView, itemIndex, newState);
 
-    const bool checked = ListView_GetCheckState(hListView, index) != FALSE;
-    ListView_SetCheckState(hListView, index, checked ? FALSE : TRUE);
-    // Mirror the change into our cache immediately so GetSelectedProcesses
-    // doesn't need to re-query the control on the next call.
-    if (index < static_cast<int>(g_visibleRows.size())) {
-        g_visibleRows[index].checked = !checked;
+    if (itemIndex < static_cast<int>(g_visibleRows.size())) {
+        g_visibleRows[itemIndex].checked = (newState != FALSE);
     }
 
     return true;

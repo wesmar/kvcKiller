@@ -6,8 +6,10 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <uxtheme.h>
-#include <cmath>
+#include <shellapi.h>
 
+#include "Math.h"
+#include "KvcContainers.h"
 #include "GlobalData.h"
 #include "Utils.h"
 #include "UIHelpers.h"
@@ -56,7 +58,7 @@ void RecreateUiFonts(HWND hwnd) {
 
 COLORREF GetParalyzePulseColor() {
     const double t     = static_cast<double>(GetTickCount64() % 4000) / 4000.0;
-    const double pulse = (std::sin(t * 6.283185307179586) + 1.0) / 2.0; // 0.0–1.0
+    const double pulse = (KvcMath::SinPi(2.0 * t) + 1.0) / 2.0; // 0.0–1.0
     const double f     = 0.3 + 0.7 * pulse;
 
     const COLORREF redColor = RGB(255, 40, 40);
@@ -91,7 +93,7 @@ void PaintParalyzeLabel(HWND hwnd, HDC targetHdc) {
     SetTextColor(memDc, GetParalyzePulseColor());
 
     const int textLen = GetWindowTextLengthW(hwnd);
-    std::wstring text(static_cast<size_t>(textLen) + 1, L'\0');
+    WString text(static_cast<size_t>(textLen) + 1, L'\0');
     if (textLen > 0) {
         GetWindowTextW(hwnd, text.data(), textLen + 1);
     }
@@ -182,7 +184,9 @@ void PaintHeaderPanels(HWND hwnd, HDC hdc) {
     // Build a bounding rect that covers both panels so the fill is clean.
     RECT headerBounds = layout.headerInfoPanel;
     headerBounds.right  = layout.headerWarningPanel.right;
-    headerBounds.bottom = max(layout.headerInfoPanel.bottom, layout.headerWarningPanel.bottom);
+    headerBounds.bottom = (layout.headerInfoPanel.bottom > layout.headerWarningPanel.bottom)
+                              ? layout.headerInfoPanel.bottom
+                              : layout.headerWarningPanel.bottom;
     FillRect(hdc, &headerBounds, hWindowBrush);
     DrawHeaderPanel(hdc, layout.headerInfoPanel);
     DrawHeaderPanel(hdc, layout.headerWarningPanel);
@@ -238,7 +242,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SendMessage(hHeaderInfoText, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont), TRUE);
         SetWindowTextW(hHeaderInfoText,
             (LoadStr(IDS_AUTHOR_LINE) + L"\n" +
-             LoadStr(IDS_APP_SUBTITLE) + L" - Windows " + GetWindowsVersion()).c_str());
+             LoadStr(IDS_APP_SUBTITLE) + L" -\nWindows " + GetWindowsVersion()).c_str());
 
         // Right panel: disclaimer / warning text.
         hHeaderWarningText = CreateWindowW(
@@ -388,7 +392,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // -------------------------------------------------------------------------
     case WMU_STATUS_TEXT: {
         // Worker thread allocated the string; we own it here and must delete it.
-        auto* pText = reinterpret_cast<std::wstring*>(wParam);
+        auto* pText = reinterpret_cast<WString*>(wParam);
         if (pText) {
             SetWindowTextW(hStatusText, pText->c_str());
             delete pText;
@@ -408,6 +412,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_ERASEBKGND:
         return 1;
+
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT) {
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+        return DefWindowProc(hwnd, msg, wParam, lParam);
 
     // -------------------------------------------------------------------------
     case WM_CTLCOLORSTATIC: {
@@ -451,6 +462,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DPICHANGED: {
         RecreateUiFonts(hwnd);
         ApplyModernWindowEffects(hwnd);
+        const int newSmX = GetSystemMetrics(SM_CXSMICON);
+        const int newSmY = GetSystemMetrics(SM_CYSMICON);
+        HICON newIconSm = static_cast<HICON>(LoadImageW(
+            GetModuleHandleW(nullptr), MAKEINTRESOURCEW(MAIN_ICON), IMAGE_ICON, newSmX, newSmY, LR_DEFAULTCOLOR));
+        if (newIconSm) {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(newIconSm));
+        }
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr,
                      suggested->left, suggested->top,
@@ -549,6 +567,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
                    LPSTR /*lpCmdLine*/, int nCmdShow)
 {
+    // Windows shows the "app starting" cursor for a GUI-subsystem process until it reports input idle
+    // (the signal WaitForInputIdle waits for), otherwise for seconds. There is no window to pump: a
+    // zero-timeout message wait reports idle at once. A single PeekMessage does not (measured).
+    MsgWaitForMultipleObjects(0, nullptr, FALSE, 0, QS_ALLINPUT);
+
     // If any arguments were passed, delegate to the CLI handler and exit.
     // This allows the binary to be used headlessly (e.g., from scripts).
     int argc;
@@ -582,10 +605,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     wc.hbrBackground = hWindowBrush;
     wc.lpszClassName = L"KVCKILLER";
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(MAIN_ICON));
-    // 16×16 small icon used in the taskbar and Alt+Tab.
+    const int cxSm   = GetSystemMetrics(SM_CXSMICON);
+    const int cySm   = GetSystemMetrics(SM_CYSMICON);
+    const int cxLg   = GetSystemMetrics(SM_CXICON);
+    const int cyLg   = GetSystemMetrics(SM_CYICON);
+
+    wc.hIcon         = static_cast<HICON>(
+        LoadImageW(hInstance, MAKEINTRESOURCEW(MAIN_ICON), IMAGE_ICON, cxLg, cyLg, LR_DEFAULTCOLOR));
     wc.hIconSm       = static_cast<HICON>(
-        LoadImageW(hInstance, MAKEINTRESOURCEW(MAIN_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+        LoadImageW(hInstance, MAKEINTRESOURCEW(MAIN_ICON), IMAGE_ICON, cxSm, cySm, LR_DEFAULTCOLOR));
 
     if (!RegisterClassExW(&wc)) {
         MessageBoxW(nullptr, LoadStr(IDS_ERR_WINDOW_CLASS).c_str(),
@@ -615,6 +643,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
                     LoadStr(IDS_ERR_CAPTION).c_str(), MB_ICONERROR);
         return 0;
     }
+
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(wc.hIconSm));
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);

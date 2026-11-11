@@ -25,6 +25,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -35,13 +36,18 @@
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <Optimization>MinSpace</Optimization>
+      <FavorSizeOrSpeed>Size</FavorSizeOrSpeed>
+      <StringPooling>true</StringPooling>
+      <SDLCheck>false</SDLCheck>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;_HAS_EXCEPTIONS=0;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp23</LanguageStandard>
-      <Optimization>MinSpace</Optimization>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <AdditionalOptions>/source-charset:utf-8 /execution-charset:utf-8 /validate-charset %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/source-charset:utf-8 /execution-charset:utf-8 /validate-charset /FS /Gy /Gw /Gs1048576 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <ResourceCompile>
       <AdditionalOptions>/c65001 %(AdditionalOptions)</AdditionalOptions>
@@ -54,23 +60,33 @@
       <EnableUAC>true</EnableUAC>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
       <UACUIAccess>false</UACUIAccess>
-      <AdditionalOptions>/BREPRO %(AdditionalOptions)</AdditionalOptions>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
+      <EntryPointSymbol>WinMainCRTStartup</EntryPointSymbol>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;advapi32.lib;shell32.lib;comctl32.lib;uxtheme.lib;dwmapi.lib;cabinet.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/IGNORE:4210 /BREPRO %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)KvcKiller.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
       <EmbedManifest>true</EmbedManifest>
     </Manifest>
+    <MASM>
+      <WarningLevel>0</WarningLevel>
+    </MASM>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="CLIHandler.cpp" />
+    <ClCompile Include="Console.cpp" />
+    <ClCompile Include="RuntimeSupport.cpp">
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+    </ClCompile>
     <ClCompile Include="GlobalData.cpp" />
     <ClCompile Include="ListViewManager.cpp" />
     <ClCompile Include="ProcessOperations.cpp" />
     <ClCompile Include="UIHelpers.cpp" />
     <ClCompile Include="Utils.cpp" />
     <ClCompile Include="DriverController.cpp" />
-    <ClCompile Include="DriverPayload.cpp" />
+    <ClCompile Include="DriverPackage.cpp" />
     <ClCompile Include="KillEngine.cpp" />
     <ClCompile Include="PplUnprotector.cpp" />
     <ClCompile Include="ProcessKiller.cpp" />
@@ -78,13 +94,18 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CLIHandler.h" />
+    <ClInclude Include="Console.h" />
+    <ClInclude Include="RuntimeSupport.h" />
+    <ClInclude Include="StrUtils.h" />
+    <ClInclude Include="KvcContainers.h" />
+    <ClInclude Include="Math.h" />
     <ClInclude Include="GlobalData.h" />
     <ClInclude Include="ListViewManager.h" />
     <ClInclude Include="ProcessOperations.h" />
     <ClInclude Include="UIHelpers.h" />
     <ClInclude Include="Utils.h" />
     <ClInclude Include="DriverController.h" />
-    <ClInclude Include="DriverPayload.h" />
+    <ClInclude Include="DriverPackage.h" />
     <ClInclude Include="GenIconSize.h" />
     <ClInclude Include="KillEngine.h" />
     <ClInclude Include="PplUnprotector.h" />
@@ -100,7 +121,13 @@
     <None Include="KvcKiller.ini" />
     <None Include="kill.ini" />
   </ItemGroup>
+  <ItemGroup>
+    <MASM Include="reg1.asm" />
+    <MASM Include="reg2.asm" />
+    <MASM Include="reg3.asm" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>
 </Project>

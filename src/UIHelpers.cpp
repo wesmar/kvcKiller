@@ -17,6 +17,13 @@
 #include <commctrl.h>
 #include <uxtheme.h>
 
+#ifndef min
+#define min(a,b) (((a) < (b)) ? (a) : (b))
+#endif
+#ifndef max
+#define max(a,b) (((a) > (b)) ? (a) : (b))
+#endif
+
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
 
@@ -53,7 +60,7 @@ constexpr COLORREF kLightListColor   = RGB(255, 255, 255);
 // --- Layout constants (all in logical pixels at 100% DPI) ---
 constexpr int kMarginX            = 24;   // Left/right outer margin
 constexpr int kTopMargin          = 16;   // Top margin above header panels
-constexpr int kHeaderHeight       = 112;  // Height of the header panels
+constexpr int kHeaderHeight       = 72;   // Height of the header panels (mathematically fits content)
 constexpr int kHeaderGapX         = 18;   // Horizontal gap between the two header panels
 constexpr int kHeaderPaddingX     = 14;   // Horizontal padding inside each header panel
 constexpr int kHeaderPaddingY     = 12;   // Vertical padding inside each header panel
@@ -122,7 +129,7 @@ RECT MakeRect(int left, int top, int width, int height) {
 // Measures the pixel width needed to display a checkbox + label, clamped to
 // [minWidth, maxWidth].  The +34 adds space for the checkbox square and
 // a few pixels of breathing room on each side.
-int MeasureToggleWidth(HWND hwnd, const std::wstring& text, int dpi) {
+int MeasureToggleWidth(HWND hwnd, const WString& text, int dpi) {
     const int minimum = MulDiv(130, dpi, 96);
     if (!hwnd || text.empty()) return minimum;
 
@@ -149,7 +156,7 @@ int MeasureWrappedControlHeight(HWND control, int width) {
     const int textLength = GetWindowTextLengthW(control);
     if (textLength <= 0) return 0;
 
-    std::wstring text(static_cast<size_t>(textLength) + 1, L'\0');
+    WString text(static_cast<size_t>(textLength) + 1, L'\0');
     GetWindowTextW(control, text.data(), textLength + 1);
     text.resize(static_cast<size_t>(textLength));
 
@@ -191,7 +198,8 @@ HFONT CreateUiFont(HWND hwnd, int pointSize, int weight) {
     lf.lfHeight  = -MulDiv(pointSize, static_cast<int>(dpi), 72);
     lf.lfWeight  = weight;
     lf.lfQuality = CLEARTYPE_QUALITY;
-    wcscpy_s(lf.lfFaceName, IsWindows11OrLater() ? L"Segoe UI Variable" : L"Segoe UI");
+    StrUtils::StrCopy(lf.lfFaceName, sizeof(lf.lfFaceName) / sizeof(wchar_t),
+                      IsWindows11OrLater() ? L"Segoe UI Variable" : L"Segoe UI");
     return CreateFontIndirectW(&lf);
 }
 
@@ -324,33 +332,35 @@ MainLayoutRects CalculateMainLayout(HWND hwnd) {
         - buttonHeight - scale(18);
     const int listWidth = max(0, clientWidth - (margin * 2));
 
-    // Split the header area ~34/66 between info and warning panels.
+    // Split the header area ~36/64 between info and warning panels.
     const int headerWidth = max(0, listWidth - headerGapX);
-    const int leftPanelWidth = max(scale(250),
-        min(scale(360), (headerWidth * 34) / 100));
+    const int leftPanelWidth = max(scale(260),
+        min(scale(380), (headerWidth * 36) / 100));
     const int rightPanelWidth = max(0, headerWidth - leftPanelWidth);
 
-    // Header height follows the wrapped text instead of clipping the copy.
+    // Header height dynamically follows the measured text content + padding.
     const int leftTextHeight = MeasureWrappedControlHeight(
         hHeaderInfoText, max(0, leftPanelWidth - headerPadX * 2));
     const int rightTextHeight = MeasureWrappedControlHeight(
         hHeaderWarningText, max(0, rightPanelWidth - headerPadX * 2));
-    const int headerHeight = max(scale(kHeaderHeight),
-        max(leftTextHeight, rightTextHeight) + headerPadY * 2);
+    const int neededTextHeight = max(leftTextHeight, rightTextHeight);
+    const int headerHeight = neededTextHeight > 0
+        ? max(scale(kHeaderHeight), neededTextHeight + headerPadY * 2 + scale(2))
+        : scale(kHeaderHeight);
 
     layout.headerInfoPanel = MakeRect(margin, topMargin, leftPanelWidth, headerHeight);
     layout.headerWarningPanel = MakeRect(
         margin + leftPanelWidth + headerGapX, topMargin,
         rightPanelWidth, headerHeight);
     layout.headerInfoText     = MakeRect(layout.headerInfoPanel.left  + headerPadX,
-                                          layout.headerInfoPanel.top   + headerPadY,
+                                          layout.headerInfoPanel.top   + headerPadY + scale(2),
                                           max(0, leftPanelWidth - headerPadX * 2),
-                                          max(0, headerHeight - headerPadY * 2));
+                                          max(0, headerHeight - headerPadY * 2 - scale(2)));
     layout.headerWarningText = MakeRect(
         layout.headerWarningPanel.left + headerPadX,
-        layout.headerWarningPanel.top + headerPadY,
+        layout.headerWarningPanel.top + headerPadY + scale(2),
         max(0, rightPanelWidth - headerPadX * 2),
-        max(0, headerHeight - headerPadY * 2));
+        max(0, headerHeight - headerPadY * 2 - scale(2)));
 
     // Lay out toggles at their measured width. If the row cannot fit them,
     // continue on the next line without truncating any label.
@@ -469,12 +479,12 @@ void LayoutMainWindow(HWND hwnd) {
 // Reads the human-readable Windows version ("24H2") and build number from the
 // registry and returns them as a single string ("24H2 (Build 26100)").
 // Returns an empty string if the registry key is missing (shouldn't happen).
-std::wstring GetWindowsVersion() {
+WString GetWindowsVersion() {
     HKEY hKey;
     DWORD dwType, dwSize;
     wchar_t version[256] = {};
     wchar_t build[256]   = {};
-    std::wstring result;
+    WString result;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                       L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
@@ -489,7 +499,7 @@ std::wstring GetWindowsVersion() {
     dwSize = sizeof(build);
     if (RegQueryValueExW(hKey, L"CurrentBuildNumber", nullptr, &dwType,
                          reinterpret_cast<LPBYTE>(build), &dwSize) == ERROR_SUCCESS)
-        result += L" (Build " + std::wstring(build) + L")";
+        result += L" (Build " + WString(build) + L")";
 
     RegCloseKey(hKey);
     return result;
@@ -503,8 +513,8 @@ std::wstring GetWindowsVersion() {
 // The string is heap-allocated here and ownership is transferred to
 // WMU_STATUS_TEXT in WndProc, which deletes it after SetWindowTextW.
 // PostMessage is used (not SendMessage) to avoid blocking worker threads.
-void UpdateStatusText(const std::wstring& text) {
-    std::wstring* pText = new std::wstring(text);
+void UpdateStatusText(const WString& text) {
+    WString* pText = new WString(text);
     if (!PostMessage(hInstMain, WMU_STATUS_TEXT, reinterpret_cast<WPARAM>(pText), 0))
         delete pText; // PostMessage failed (e.g., window destroyed) — don't leak.
 }
@@ -513,9 +523,9 @@ void UpdateStatusText(const std::wstring& text) {
 // Must be called from the UI thread (directly updates the static control).
 void UpdateProcessCount(int targetCount, int runningCount, int extraCount) {
     wchar_t buffer[128];
-    swprintf_s(buffer,
-               L"Targets: %d | Running: %d | Extra live: %d | Visible: %d",
-               targetCount, runningCount, extraCount,
-               ListView_GetItemCount(hListView));
+    wsprintfW(buffer,
+              L"Targets: %d | Running: %d | Extra live: %d | Visible: %d",
+              targetCount, runningCount, extraCount,
+              ListView_GetItemCount(hListView));
     SetWindowTextW(hProcessCount, buffer);
 }

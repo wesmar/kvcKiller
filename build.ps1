@@ -13,11 +13,9 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectFile = Join-Path $ProjectRoot "src\KvcKiller.vcxproj"
 $OutputDir   = Join-Path $ProjectRoot "bin"
 $OutputExe   = Join-Path $OutputDir "KvcKiller.exe"
-$RscIcon     = Join-Path $ProjectRoot "rsc\kvc.ico"
-$Driver1     = Join-Path $ProjectRoot "rsc\driver1.sys"
-$Driver2     = Join-Path $ProjectRoot "rsc\driver2.sys"
 $IconDir     = Join-Path $ProjectRoot "ICON"
-$TargetIcon  = Join-Path $IconDir "kvc.ico"
+$AppIcon     = Join-Path $IconDir "kvc.ico"
+$GuestBmp    = Join-Path $IconDir "guest.bmp"
 
 $TransientDirs = @(
     (Join-Path $ProjectRoot ".vs"),
@@ -84,7 +82,12 @@ function Resolve-MSBuild {
     # Sort descending so newest Visual Studio version (e.g. 18, 17...) is evaluated first
     $sortedVsDirs = $discoveredVsDirs | Sort-Object {
         $cleanNum = ($_.Name -replace '[^\d.]', '')
-        if ($cleanNum) { [version]$cleanNum } else { [version]'0.0' }
+        if ($cleanNum) {
+            if ($cleanNum -notmatch '\.') { $cleanNum = "$cleanNum.0" }
+            [version]$cleanNum
+        } else {
+            [version]'0.0'
+        }
     } -Descending
 
     $editions = @("Enterprise", "Professional", "Community", "BuildTools", "Preview")
@@ -112,103 +115,136 @@ function Resolve-MSBuild {
     throw "MSBuild not found. Install Visual Studio or Build Tools with Desktop C++ workload."
 }
 
-function Build-IconPayload {
+function Resolve-Dumpbin {
+    $vswhereCandidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"),
+        (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe")
+    )
+    $vswhere = $vswhereCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if ($vswhere) {
+        $installationPath = & $vswhere -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($LASTEXITCODE -eq 0 -and $installationPath) {
+            $dumpbin = Get-ChildItem "$installationPath\VC\Tools\MSVC" -Filter 'dumpbin.exe' -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match 'Hostx64\\x64' } |
+                Select-Object -First 1 -ExpandProperty FullName
+            if ($dumpbin) { return $dumpbin }
+        }
+    }
+    $candidates = @(
+        (Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Filter 'dumpbin.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1 -ExpandProperty FullName),
+        (Get-Command dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    return $null
+}
+
+function Resolve-VCToolsVersion {
+    $vswhereCandidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"),
+        (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe")
+    )
+    $vswhere = $vswhereCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if ($vswhere) {
+        $installationPath = & $vswhere -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($LASTEXITCODE -eq 0 -and $installationPath) {
+            $msvcDir = "$installationPath\VC\Tools\MSVC"
+            if (Test-Path -LiteralPath $msvcDir) {
+                $latest = Get-ChildItem -LiteralPath $msvcDir -Directory | Sort-Object Name -Descending | Select-Object -First 1
+                if ($latest) { return $latest.Name }
+            }
+        }
+    }
+    return $null
+}
+
+function Test-NoCrtDependencies {
     param(
-        [Parameter(Mandatory = $true)][string]$IconSource,
-        [Parameter(Mandatory = $true)][string]$Driver1Source,
-        [Parameter(Mandatory = $true)][string]$Driver2Source,
-        [Parameter(Mandatory = $true)][string]$TargetIcon
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [string]$DumpbinPath
     )
 
-    if (-not (Test-Path -LiteralPath $IconSource)) {
-        throw "Icon source file not found: $IconSource"
-    }
-    if (-not (Test-Path -LiteralPath $Driver1Source)) {
-        throw "PPL unprotect driver not found: $Driver1Source"
-    }
-    if (-not (Test-Path -LiteralPath $Driver2Source)) {
-        throw "Process termination driver not found: $Driver2Source"
+    Write-Host "[*] Verifying Zero-CRT imports (dumpbin)..." -ForegroundColor Cyan
+    if (-not $DumpbinPath -or -not (Test-Path -LiteralPath $DumpbinPath)) {
+        Write-Host "  [-] dumpbin.exe not found - skipping import verification." -ForegroundColor DarkGray
+        return $true
     }
 
-    $targetDir = Split-Path -Parent $TargetIcon
-    if (-not (Test-Path -LiteralPath $targetDir)) {
-        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    $lines = & $DumpbinPath /dependents "$ExePath" 2>&1
+    if (-not $lines) {
+        Write-Host "  [-] dumpbin output not captured - skipping import verification." -ForegroundColor DarkGray
+        return $true
     }
 
-    $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("kvckiller_icon_" + [System.Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-
-    try {
-        $tempDriver1 = Join-Path $tempDir "driver1"
-        $tempDriver2 = Join-Path $tempDir "driver2"
-        Copy-Item -LiteralPath $Driver1Source -Destination $tempDriver1 -Force
-        Copy-Item -LiteralPath $Driver2Source -Destination $tempDriver2 -Force
-
-        # Keep cabinet metadata deterministic regardless of checkout timestamps.
-        $cabTimestamp = [DateTime]"2030-01-01 00:00:00"
-        foreach ($staged in @($tempDriver1, $tempDriver2)) {
-            $item = Get-Item -LiteralPath $staged
-            $item.CreationTime = $cabTimestamp
-            $item.LastWriteTime = $cabTimestamp
-            $item.LastAccessTime = $cabTimestamp
+    $inSection = $false
+    $deps = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $lines) {
+        if ($line -match 'Image has the following dependencies') { $inSection = $true; continue }
+        if ($inSection) {
+            if ($line -match '^\s*$' -and $deps.Count -gt 0) { break }
+            $dll = $line.Trim()
+            if ($dll -and $dll -notmatch '^Summary') { $deps.Add($dll) }
         }
+    }
 
-        $ddf = @"
-.Set CabinetNameTemplate=kvckiller.cab
-.Set DiskDirectoryTemplate=$tempDir
-.Set CompressionType=LZX
-.Set CompressionMemory=21
-.Set MaxCabinetSize=0
-.Set Cabinet=on
-.Set Compress=on
-"$tempDriver1" driver1
-"$tempDriver2" driver2
-"@
-        $ddfPath = Join-Path $tempDir "pack.ddf"
-        [System.IO.File]::WriteAllText($ddfPath, $ddf, [System.Text.Encoding]::ASCII)
+    if ($deps.Count -eq 0) {
+        Write-Host "  [+] dumpbin: no external DLL dependencies." -ForegroundColor Green
+        return $true
+    }
 
-        Write-Host "[*] Compressing both kernel components into one CAB (LZX:21)..." -ForegroundColor Cyan
-        $process = Start-Process makecab.exe `
-            -ArgumentList '/F', "`"$ddfPath`"" `
-            -Wait -PassThru -NoNewWindow -WorkingDirectory $tempDir
-        if ($process.ExitCode -ne 0) {
-            throw "makecab failed (exit code $($process.ExitCode))."
+    $forbidden = @('crt', 'msvcp', 'vcruntime', 'ucrtbase')
+    $hasForbidden = $false
+
+    Write-Host "  [*] Imported DLLs:" -ForegroundColor Cyan
+    foreach ($d in $deps) {
+        $bad = $false
+        foreach ($f in $forbidden) {
+            if ($d.ToLower().Contains($f)) { $bad = $true; break }
         }
-
-        $tempCab = Join-Path $tempDir "kvckiller.cab"
-        if (-not (Test-Path -LiteralPath $tempCab)) {
-            throw "Cabinet was not produced: $tempCab"
+        if ($bad) {
+            Write-Host "    [!] $d (FORBIDDEN CRT DEPENDENCY!)" -ForegroundColor Red
+            $hasForbidden = $true
+        } else {
+            Write-Host "    [+] $d" -ForegroundColor Green
         }
+    }
 
-        Write-Host "[*] Assembling payload into: $TargetIcon" -ForegroundColor Cyan
-        $iconBytes = [System.IO.File]::ReadAllBytes($IconSource)
-        $cabBytes = [System.IO.File]::ReadAllBytes($tempCab)
-        $fsOut = [System.IO.File]::Create($TargetIcon)
-        try {
-            $fsOut.Write($iconBytes, 0, $iconBytes.Length)
-            $fsOut.Write($cabBytes, 0, $cabBytes.Length)
-        }
-        finally {
-            $fsOut.Dispose()
-        }
+    if ($hasForbidden) {
+        throw "Zero-CRT check failed: CRT library found in import table!"
+    }
 
-        $iconItem = Get-Item -LiteralPath $TargetIcon
-        Write-Host ("[+] Generated icon payload: {0} ({1:N2} KB)" -f $TargetIcon, ($iconItem.Length / 1KB)) -ForegroundColor Green
+    Write-Host "  [+] Zero-CRT verified: 100% native Windows OS APIs, 0 CRT dependencies!" -ForegroundColor Green
+    return $true
+}
 
-        $headerPath = Join-Path $ProjectRoot "src\GenIconSize.h"
-        $headerText = @"
+function Ensure-Resources {
+    param(
+        [Parameter(Mandatory = $true)][string]$IconPath,
+        [Parameter(Mandatory = $true)][string]$GuestBmpPath
+    )
+
+    if (-not (Test-Path -LiteralPath $IconPath)) {
+        throw "Application icon not found: $IconPath"
+    }
+    if (-not (Test-Path -LiteralPath $GuestBmpPath)) {
+        throw "Guest image not found: $GuestBmpPath"
+    }
+
+    $iconItem = Get-Item -LiteralPath $IconPath
+    Write-Host ("[+] Application icon verified: {0} ({1:N2} KB)" -f $IconPath, ($iconItem.Length / 1KB)) -ForegroundColor Green
+
+    $bmpItem = Get-Item -LiteralPath $GuestBmpPath
+    Write-Host ("[+] Guest image verified: {0} ({1:N2} KB)" -f $GuestBmpPath, ($bmpItem.Length / 1KB)) -ForegroundColor Green
+
+    $headerPath = Join-Path $ProjectRoot "src\GenIconSize.h"
+    $headerText = @"
 // Generated by build.ps1. Do not edit manually.
 #pragma once
-#define ICON_HEADER_SIZE $($iconBytes.Length)
+#define ICON_HEADER_SIZE 0
 "@
-        [System.IO.File]::WriteAllText($headerPath, $headerText, [System.Text.Encoding]::ASCII)
-        Write-Host "[+] Cabinet offset: $($iconBytes.Length) bytes" -ForegroundColor Green
-    }
-    finally {
-        if (Test-Path -LiteralPath $tempDir) {
-            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
+    [System.IO.File]::WriteAllText($headerPath, $headerText, [System.Text.Encoding]::ASCII)
 }
 
 function Get-PresentTransientDirs {
@@ -238,6 +274,7 @@ function Remove-TransientDirs {
             Remove-Item -LiteralPath $objFile.FullName -Force -ErrorAction SilentlyContinue
         }
     }
+    Start-Sleep -Milliseconds 100
 }
 
 function Assert-CleanLayout {
@@ -287,6 +324,14 @@ function Invoke-Build {
         $ProjectFile
         "/t:Build"
         "/p:Configuration=Release;Platform=x64"
+    )
+
+    $vcToolsVer = Resolve-VCToolsVersion
+    if ($vcToolsVer) {
+        $arguments += "/p:VCToolsVersion=$vcToolsVer"
+    }
+
+    $arguments += @(
         "/m"
         "/nr:false"
         "/v:minimal"
@@ -303,6 +348,10 @@ try {
     Assert-ProjectExists
     $msbuild = Resolve-MSBuild
     Write-Host "[*] Using MSBuild: $msbuild" -ForegroundColor Cyan
+    $dumpbin = Resolve-Dumpbin
+    if ($dumpbin) {
+        Write-Host "[*] Using Dumpbin: $dumpbin" -ForegroundColor Cyan
+    }
 
     Remove-TransientDirs
     Assert-CleanLayout
@@ -316,9 +365,8 @@ try {
         exit 0
     }
 
-    # Generate ICON\kvc.ico from rsc\kvc.ico + CAB(driver1, driver2; LZX:21)
-    Build-IconPayload -IconSource $RscIcon -Driver1Source $Driver1 `
-        -Driver2Source $Driver2 -TargetIcon $TargetIcon
+    # Verify ICON\guest.bmp and ICON\kvc.ico
+    Ensure-Resources -IconPath $AppIcon -GuestBmpPath $GuestBmp
 
     Assert-OutputUnlocked
     Invoke-Build -MSBuildPath $msbuild
@@ -330,6 +378,8 @@ try {
     if (-not (Test-Path -LiteralPath $OutputExe)) {
         throw "Build completed but output executable was not produced: $OutputExe"
     }
+
+    Test-NoCrtDependencies -ExePath $OutputExe -DumpbinPath $dumpbin
 
     $file = Get-Item -LiteralPath $OutputExe
     Write-Host "[+] Build successful." -ForegroundColor Green

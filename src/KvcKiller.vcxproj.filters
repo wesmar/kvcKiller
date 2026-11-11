@@ -21,6 +21,12 @@
     <ClCompile Include="CLIHandler.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Console.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="RuntimeSupport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="GlobalData.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -39,7 +45,7 @@
     <ClCompile Include="DriverController.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="DriverPayload.cpp">
+    <ClCompile Include="DriverPackage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KillEngine.cpp">
@@ -57,6 +63,21 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CLIHandler.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Console.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RuntimeSupport.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="StrUtils.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="KvcContainers.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Math.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="GlobalData.h">
@@ -77,7 +98,7 @@
     <ClInclude Include="DriverController.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="DriverPayload.h">
+    <ClInclude Include="DriverPackage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="GenIconSize.h">
@@ -105,14 +126,19 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="KvcKiller.manifest">
-      <Filter>Resource Files</Filter>
-    </None>
-    <None Include="KvcKiller.ini">
-      <Filter>Resource Files</Filter>
-    </None>
-    <None Include="kill.ini">
-      <Filter>Resource Files</Filter>
-    </None>
+    <None Include="KvcKiller.manifest" />
+    <None Include="KvcKiller.ini" />
+    <None Include="kill.ini" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="reg1.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
+    <MASM Include="reg2.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
+    <MASM Include="reg3.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
   </ItemGroup>
 </Project>

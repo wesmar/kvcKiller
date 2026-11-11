@@ -8,7 +8,7 @@
 // demand-start services.
 
 #include <windows.h>
-#include <string>
+#include "KvcContainers.h"
 
 enum class DriverRole {
     PplUnprotector,
@@ -21,7 +21,7 @@ public:
     static HANDLE GetDriverHandle(DriverRole role);
     static bool IsDriverLoaded(DriverRole role);
 
-    static std::wstring GetDriverPath(DriverRole role);
+    static WString GetDriverPath(DriverRole role);
 
     // Closes both device handles, stops and removes both services, restores
     // temporary driver configuration, and deletes the staged driver files.

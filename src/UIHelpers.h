@@ -6,7 +6,7 @@
 #pragma once
 
 #include <windows.h>
-#include <string>
+#include "KvcContainers.h"
 
 struct MainLayoutRects {
     RECT headerInfoPanel{};
@@ -73,7 +73,7 @@ void LayoutMainWindow(HWND hwnd);
 // ---------------------------------------------------------------------------
 
 /// Reads DisplayVersion + CurrentBuildNumber from the registry.
-std::wstring GetWindowsVersion();
+WString GetWindowsVersion();
 
 // ---------------------------------------------------------------------------
 // Status-bar / process-count updates
@@ -81,7 +81,7 @@ std::wstring GetWindowsVersion();
 
 /// Thread-safe: heap-allocates the string and posts WMU_STATUS_TEXT
 /// to the main window; the message handler deletes the allocation.
-void UpdateStatusText(const std::wstring& text);
+void UpdateStatusText(const WString& text);
 
 /// Updates the process-count footer label (must be called from the UI thread).
 void UpdateProcessCount(int targetCount, int runningCount, int extraCount);

@@ -12,8 +12,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <atomic>
-#include <string>
-#include <map>
+#include "KvcContainers.h"
 
 // =============================================================================
 // Window / GDI handles
@@ -48,9 +47,9 @@ extern COLORREF g_windowColor;  ///< Resolved window background colour for the c
 // =============================================================================
 
 constexpr int WINDOW_WIDTH      = 860;   ///< Default window width in logical pixels.
-constexpr int WINDOW_HEIGHT     = 660;   ///< Default window height in logical pixels.
+constexpr int WINDOW_HEIGHT     = 600;   ///< Default window height in logical pixels.
 constexpr int MIN_WINDOW_WIDTH  = 760;   ///< Minimum resizable width.
-constexpr int MIN_WINDOW_HEIGHT = 620;   ///< Minimum resizable height.
+constexpr int MIN_WINDOW_HEIGHT = 560;   ///< Minimum resizable height.
 constexpr int BUTTON_WIDTH      = 170;   ///< Width of each action button.
 constexpr int BUTTON_HEIGHT     = 40;    ///< Height of each action button.
 
@@ -112,9 +111,9 @@ extern bool g_sortAscending;  ///< True when the active sort direction is ascend
 // Thread-safe per-process state
 // =============================================================================
 
-extern CRITICAL_SECTION                      g_statusLock;         ///< Guards g_lastActionByName and g_prevRunningByName.
-extern std::map<std::wstring, std::wstring>  g_lastActionByName;   ///< Maps normalised process key -> last action string.
-extern std::map<std::wstring, bool>          g_prevRunningByName;  ///< Maps normalised process key -> running state from the previous refresh cycle.
+extern CRITICAL_SECTION         g_statusLock;         ///< Guards g_lastActionByName and g_prevRunningByName.
+extern Map<WString, WString>     g_lastActionByName;   ///< Maps normalised process key -> last action string.
+extern Map<WString, bool>        g_prevRunningByName;  ///< Maps normalised process key -> running state from the previous refresh cycle.
 
 // =============================================================================
 // WM_USER message IDs
@@ -125,7 +124,7 @@ extern std::map<std::wstring, bool>          g_prevRunningByName;  ///< Maps nor
 
 constexpr UINT WMU_REFRESH_LIST = WM_USER + 1;  ///< Requests a full ListView rebuild.  No parameters.
 constexpr UINT WMU_SET_BUTTONS  = WM_USER + 2;  ///< wParam: 1 = enable action buttons, 0 = disable.
-constexpr UINT WMU_STATUS_TEXT  = WM_USER + 3;  ///< wParam: heap-allocated std::wstring*; handler deletes it.
+constexpr UINT WMU_STATUS_TEXT  = WM_USER + 3;  ///< wParam: heap-allocated WString*; handler deletes it.
 
 // =============================================================================
 // Shutdown coordination

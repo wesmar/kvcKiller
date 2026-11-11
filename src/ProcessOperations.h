@@ -7,9 +7,8 @@
 #include <windows.h>
 #include <array>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
+#include "KvcContainers.h"
 
 inline constexpr std::array<std::wstring_view, 3> kDefenderTargets{
     L"MsMpEng",
@@ -17,7 +16,7 @@ inline constexpr std::array<std::wstring_view, 3> kDefenderTargets{
     L"SecurityHealthSystray"
 };
 
-std::vector<std::wstring> DefenderTargetList();
+Vector<WString> DefenderTargetList();
 
 enum class KillOutcome {
     Succeeded,
@@ -27,9 +26,9 @@ enum class KillOutcome {
 };
 
 struct KillTargetReport {
-    std::wstring name;
+    WString name;
     DWORD pid = 0;
-    std::vector<DWORD> initialPids;
+    Vector<DWORD> initialPids;
     bool wasRunning = false;
     bool trapSet = false;
     bool terminated = false;
@@ -45,14 +44,14 @@ struct KillOperationReport {
     bool securityHealthStopped = false;
     bool defenderSet = false;
     KillOutcome outcome = KillOutcome::Failed;
-    std::vector<KillTargetReport> targets;
+    Vector<KillTargetReport> targets;
 };
 
 /// Shared CLI/GUI kill pipeline. It applies IFEO first when requested, lowers
 /// protection for the running batch, terminates targets, verifies the final
 /// state, and evaluates Defender by service state instead of helper processes.
 KillOperationReport ExecuteKillTargets(
-    std::span<const std::wstring> targets,
+    std::span<const WString> targets,
     bool paralyzeFirst,
     bool defenderSet);
 
@@ -62,14 +61,14 @@ KillOperationReport ExecuteKillTargets(
 
 // Applies the IFEO Debugger block to a list of process names in a single batch.
 // Returns the number of processes successfully paralyzed.
-int ParalyzeProcessesBatch(const std::vector<std::wstring>& processNames);
+int ParalyzeProcessesBatch(const Vector<WString>& processNames);
 
 // Removes the IFEO Debugger block from a list of process names in a single batch.
 // Returns the number of processes successfully unparalyzed.
-int UnparalyzeProcessesBatch(const std::vector<std::wstring>& processNames);
+int UnparalyzeProcessesBatch(const Vector<WString>& processNames);
 
 // Checks if a specific process is currently paralyzed (Debugger is set).
-bool IsProcessParalyzed(const std::wstring& processName);
+bool IsProcessParalyzed(const WString& processName);
 
 // ---------------------------------------------------------------------------
 // Driver lifecycle

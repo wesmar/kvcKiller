@@ -1,8 +1,7 @@
 #pragma once
 
 #include <windows.h>
-
-#include <vector>
+#include "KvcContainers.h"
 
 struct PplTargetResult {
     DWORD pid = 0;
@@ -22,8 +21,8 @@ public:
     // Lowers the EPROCESS protection field for the selected PIDs. The return
     // value reports a completed traversal; per-process outcomes are returned
     // in results and may still contain misses or write failures.
-    static bool LowerProtection(const std::vector<DWORD>& pids,
-                                std::vector<PplTargetResult>& results);
+    static bool LowerProtection(const Vector<DWORD>& pids,
+                                Vector<PplTargetResult>& results);
 
     static bool IsReady();
 };

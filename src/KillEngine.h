@@ -1,10 +1,9 @@
 #pragma once
 
 #include "PplUnprotector.h"
+#include "KvcContainers.h"
 
 #include <windows.h>
-
-#include <vector>
 
 struct KillAttemptResult {
     bool requested = false;
@@ -25,8 +24,8 @@ public:
     static bool HasProcessTerminator();
 
     // Performs one tree walk for the complete target batch.
-    static bool LowerProtection(const std::vector<DWORD>& pids,
-                                std::vector<PplTargetResult>& results);
+    static bool LowerProtection(const Vector<DWORD>& pids,
+                                Vector<PplTargetResult>& results);
 
     // Sends the kernel termination request and verifies that the process
     // object is signalled. A user-mode fallback is attempted when the kernel

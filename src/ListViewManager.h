@@ -6,9 +6,7 @@
 #pragma once
 
 #include <windows.h>
-#include <string>
-#include <vector>
-#include <limits>
+#include "KvcContainers.h"
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -16,22 +14,22 @@
 
 /// One row displayed in the ListView.
 struct UiProcessRow {
-    std::wstring canonicalName;                          // display-clean name, no .exe
-    std::wstring normalizedKey;                          // lower-case, no .exe
-    std::wstring displayName;                            // text shown in column 0
-    DWORD        pid            = 0;
-    bool         running        = false;
-    bool         extra          = false;                 // not in config — live extra
-    bool         predefined     = false;                 // comes from config
-    bool         checked        = false;                 // checkbox state
-    int          predefinedIndex = (std::numeric_limits<int>::max)();
-    std::wstring lastAction     = L"-";
+    WString canonicalName;                          // display-clean name, no .exe
+    WString normalizedKey;                          // lower-case, no .exe
+    WString displayName;                            // text shown in column 0
+    DWORD   pid            = 0;
+    bool    running        = false;
+    bool    extra          = false;                 // not in config — live extra
+    bool    predefined     = false;                 // comes from config
+    bool    checked        = false;                 // checkbox state
+    int     predefinedIndex = 0x7FFFFFFF;
+    WString lastAction     = L"-";
 };
 
 /// Scroll / selection position saved before and restored after a list rebuild.
 struct ListViewState {
-    std::wstring topKey;       // normalizedKey of the first visible row
-    std::wstring selectedKey;  // normalizedKey of the selected row
+    WString topKey;       // normalizedKey of the first visible row
+    WString selectedKey;  // normalizedKey of the selected row
 };
 
 // ---------------------------------------------------------------------------
@@ -47,7 +45,7 @@ void InitListView();
 void RefreshProcessList();
 
 /// Returns canonical names of all checked rows.
-std::vector<std::wstring> GetSelectedProcesses();
+Vector<WString> GetSelectedProcesses();
 
 /// Handles NM_CLICK and toggles the checkbox when the user clicks anywhere
 /// on a row outside the state icon itself.

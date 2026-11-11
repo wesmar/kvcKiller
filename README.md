@@ -8,7 +8,7 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)
 ![Language](https://img.shields.io/badge/language-C%2B%2B23-orange)
-![CRT](https://img.shields.io/badge/CRT-static%20%2FMT-green)
+![CRT](https://img.shields.io/badge/CRT-Zero--CRT%20%2F%20Native%20Win32-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
 [**Download KvcKiller.7z**](../../releases/latest/download/KvcKiller.7z) &nbsp;·&nbsp; Password: `github.com`
@@ -23,24 +23,30 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 **GUI — main window**
 
-![KvcKiller GUI](images/kvcKiller.jpg)
+![KvcKiller GUI](images/kvcKiller.webp)
 
 </div>
 
 ---
 
-## What's New - 09.11.2026
+## What's New - 10.11.2026 (v2.0.5)
 
-KvcKiller 2.0 replaces the previous single-driver path with the two-stage
-signed-driver design used by WinDefCtl. The old `wsftprm.sys` approach depended on a
-vulnerable driver and could require an unsafe driver-blocklist exception. The new pipeline
-lowers target protection with one component, performs termination with a separate component,
-and applies IFEO before the kill phase.
+The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture, a 1/70 static detection profile on VirusTotal at the time of publication, and a triple MASM x64 micro-assembler pipeline, eliminating static binary signatures and readable strings across executable sections:
 
-The GUI now provides **KILL DEFENDER** for `MsMpEng`, `SecurityHealthService`, and
-`SecurityHealthSystray`. CLI adds `-kill-defender` and `-restore-defender`, with outcome
-reporting based on the original PID instances and service state. A service restart with a
-new PID no longer turns a successful one-shot kill into `FAILED`.
+- **Steganographic 24-Bit Pixel Matrix (`guest.bmp`)** — Kernel-mode binaries have their 128-byte DOS MZ headers severed and are bundled into a headless binary stream compressed into an LZX Cabinet with a masked `MSCF` signature. The resulting blob is embedded directly into the pixel array of a legitimate 24-bit bitmap (`ICON\guest.bmp`, RCDATA 172). To static inspection and automated AV heuristics, the resource presents as benign visual noise, resulting in an exceptional 1/70 detection score on VirusTotal.
+
+<div align="center">
+
+![Steganographic Carrier](images/guest.bmp)
+
+<sub><em>The binary armorer — just an innocent image</em></sub>
+
+</div>
+
+- **In-Flight FDI Stream Decompression & Authentic DOS Stub Inheritance** — Custom Diamond FDI hooks unmask the `MSCF` header in memory during stream read, decompress the payload in RAM, borrow an authentic, digitally-signed 128-byte DOS header from system `ks.sys` (resolved dynamically via `GetSystemDirectoryW`), patch offset `0x3C` (`e_lfanew`), and reconstruct both signed ring-0 modules bit-for-bit without temporary intermediate files.
+- **Staged Masquerade as `guest1.bmp` and `guest2.bmp`** — Reconstructed modules are staged to `System32\drivers` using neutral `.bmp` image extensions instead of traditional `.sys`. The kernel loader processes binaries based on internal PE structures rather than extensions, bypassing simple directory file-creation heuristics. Staged files are deleted immediately after execution.
+- **Triple MASM x64 Micro-Assembler Pipeline (`reg1.asm`, `reg2.asm`, `reg3.asm`)** — All device names, diagnostic sessions, and WOW64 registry paths are distributed across three distinct assembly translation units. Each routine features an atomic lock-free spin-lock and reconstitutes target wide strings in CPU registers within a few clock cycles (XOR + `rol 4` bitwise rotation + delta subtraction). The binary `.rdata` section contains zero plaintext footprint.
+- **Enforced Data Alignment (`ALIGN 8`)** — Eliminates `STATUS_DATATYPE_MISALIGNMENT` (Win32 Error 998 / `ERROR_NOACCESS`), which occurs during kernel `NtOpenKey` dispatches when wide-string buffers are misaligned in memory.
 
 ---
 
@@ -48,7 +54,9 @@ new PID no longer turns a successful one-shot kill into `FAILED`.
 
 - [Feature Overview](#feature-overview)
 - [Architecture](#architecture)
-- [Driver Lifecycle](#driver-lifecycle)
+- [Steganographic Packaging & Ring-0 Deployment](#steganographic-packaging--ring-0-deployment)
+- [Triple MASM x64 Micro-Assembler Architecture](#triple-masm-x64-micro-assembler-architecture)
+- [A Word for Analysts and Cloners](#a-word-for-analysts-and-cloners)
 - [Kill Flow](#kill-flow)
 - [Paralyze: IFEO Offline Editing](#paralyze-ifeo-offline-editing)
   - [What IFEO Does](#what-ifeo-does)
@@ -60,6 +68,7 @@ new PID no longer turns a successful one-shot kill into `FAILED`.
 - [GUI Reference](#gui-reference)
 - [CLI Reference](#cli-reference)
 - [Registry & Configuration](#registry--configuration)
+- [Zero-CRT Architecture (Modern C++23)](#zero-crt-architecture-modern-c23)
 - [Module Map](#module-map)
 - [Build](#build)
 - [Kernel Components](#kernel-components)
@@ -79,15 +88,19 @@ Self-protection at ring 3 is irrelevant when the termination signal arrives from
   the target's `EPROCESS` protection; the second component sends the termination request for
   the now-unprotected process
 - **Two independent services** — `KvcPplUnprotect` and `KvcProcessKill` are demand-start
-  services loaded from extensionless images in `System32\drivers`
-- **FDI-backed payload** — both driver images are packed into one LZX Cabinet appended to
-  `KvcKiller.ico`. The extractor dispatches FDI output handles per cabinet member, verifies
-  both names and byte content, then stages the two files independently
+  services loaded from `guest1.bmp` and `guest2.bmp` in `System32\drivers`
+- **Steganographic Driver Package** — both driver images have their 128-byte MZ/DOS headers
+  stripped, combined into a headless binary stream packed as `guest.bmp`, compressed into an LZX Cabinet with
+  obfuscated `MSCF` magic headers, and wrapped as pixel data in a valid 24-bit bitmap (`ICON\guest.bmp`). The runtime
+  extracts the CAB from the BMP in memory, unmasks `MSCF` in-flight via FDI stream callbacks, borrows the legitimate
+  128-byte DOS template from `ks.sys` (resolved dynamically via `GetSystemDirectoryW`), patches byte `0x3C` (`e_lfanew`),
+  and reconstructs both signed drivers bit-for-bit in memory before staging as `guest1.bmp` and `guest2.bmp`. Zero PE
+  headers and zero archival magic signatures exist in the binary image.
 - **Fail-safe sequencing** — a PPL write is accepted only after a read-back confirms the
   protection byte is zero. If the kernel termination request is rejected, the engine attempts
   a user-mode `TerminateProcess` fallback
 - **Deterministic cleanup** — both handles are closed, both services are stopped and deleted,
-  the temporary K7 caller-path value is restored, and both driver files are removed
+  the temporary caller verification registry value is restored, and both staged files are removed
 
 ### Paralyze Mode
 
@@ -146,7 +159,7 @@ flowchart TD
     H --> I[PplUnprotector]
     H --> J[ProcessKiller]
     H --> K[DriverController]
-    K --> L[DriverPayload / multi-file FDI]
+    K --> L[DriverPackage / in-memory FDI]
     I --> M[Driver 1: EPROCESS unprotect]
     J --> N[Driver 2: handshake and kill IOCTL]
     F --> R[ConfigReader]
@@ -175,7 +188,7 @@ WinMain
        ├─ PplUnprotector      (offset discovery, EPROCESS walk, protection-byte update)
        ├─ ProcessKiller       (discovery, terminator IOCTL, restoration)
        ├─ DriverController    (two SCM services, device handles, configuration, cleanup)
-       ├─ DriverPayload       (single CAB, independent in-memory FDI outputs)
+       ├─ DriverPackage       (steganographic guest image, template assembly)
        └─ ConfigReader        (HKCU registry: target list, path cache, history ring buffer)
 ```
 
@@ -201,51 +214,133 @@ cross-thread `SendMessage` is needed.
 
 ---
 
-## Driver Lifecycle
+## Steganographic Packaging & Ring-0 Deployment
+
+The ring-0 payload delivery architecture in KvcKiller 2.0.5 was engineered to scatter binary signatures and strip all recognizable Portable Executable characteristics prior to service loading.
 
 ```mermaid
-flowchart LR
-    A[Kill action] --> B[KillEngine::Start]
-    B --> C[FDI: CAB to two in-memory outputs]
-    C --> D[Match driver1 and driver2 by name]
-    D --> E[Verify file bytes]
-    E --> F[Register KvcPplUnprotect]
-    E --> G[Register KvcProcessKill]
-    F --> H[Open RTCore64 device]
-    G --> I[Set temporary K7 caller path]
-    I --> J[Open DosK7RKScnDrv device]
-    H --> K[Resolve EPROCESS offsets]
-    J --> L[Terminator handshake]
-    K --> M[Kill pipeline]
-    L --> M
-    M --> N[Close handles and stop services]
-    N --> O[Restore K7 value and delete files]
+flowchart TD
+    subgraph Resource ["Resource Container (RCDATA 172)"]
+        BMP["ICON/guest.bmp<br/>24-bit Bitmap Container"]
+        CAB["LZX Compressed Stream<br/>Masked MSCF Signature"]
+        Tails["Headless Binary Tails<br/>Tail 1: 13,896 B &bull; Tail 2: 52,408 B"]
+        BMP --> CAB --> Tails
+    end
+
+    subgraph Memory ["In-Flight Memory Reconstruction"]
+        FDI["Diamond FDI Hooks<br/>FdiRead Signature Unmasking"]
+        Template["System32/drivers/ks.sys<br/>Authentic 128-byte DOS Template"]
+        Assemble["e_lfanew Injected<br/>Bit-for-Bit Authenticode Restitution"]
+        Tails --> FDI --> Assemble
+        Template --> Assemble
+    end
+
+    subgraph Storage ["Staged Zero-Footprint Deployment"]
+        D1["System32/drivers/guest1.bmp"]
+        D2["System32/drivers/guest2.bmp"]
+        Assemble --> D1
+        Assemble --> D2
+    end
+
+    subgraph Execution ["Kernel Service Execution"]
+        SCM["Service Control Manager"]
+        D1 -->|Demand-Start Load| SCM
+        D2 -->|Demand-Start Load| SCM
+    end
 ```
 
-**Driver extraction**
+### 1. Fragmented Pixel Matrix and the Appearance of Visual Chaos
 
-Both kernel images are stored as one LZX-compressed Cabinet appended to `KvcKiller.ico`.
-`build.ps1` records the exact ICO header size in `GenIconSize.h`, so extraction starts at a
-known offset instead of scanning for a coincidental `MSCF` signature. The compression is
-equivalent to:
+Rather than embedding raw binaries, both digitally signed ring-0 modules have their initial 128-byte DOS MZ headers excised. This strips the PE structure into an unstructured byte sequence that evades signature-matching heuristics, producing two headless binary tails:
+- $kTail_1$ (13,896 bytes) — PPL privilege revocation component,
+- $kTail_2$ (52,408 bytes) — process termination component.
 
+The combined headless stream is compressed using the LZX algorithm in Microsoft Cabinet format (`guest.bmp`). The initial 4 magic bytes (`MSCF`) are masked with a 32-bit XOR key:
+`[0xA5, 0x5A, 0xF0, 0x0F]` $\to$ `[0xE8, 0x09, 0xB3, 0x49]`.
+
+The obfuscated archive is embedded directly into the pixel array of an uncompressed 24-bit bitmap (`ICON\guest.bmp`), linked as resource `RCDATA 172`. To static scanners, YARA rules, and PE resource editors (such as Resource Hacker), the data presents as a standard, well-formed Windows bitmap whose pixel array appears to be pseudorandom visual noise.
+
+<div align="center">
+
+![Steganographic Carrier](images/guest.bmp)
+
+<sub><em>The binary armorer — just an innocent image (guest.bmp, 108×108 24-bit RGB)</em></sub>
+
+</div>
+
+### 2. In-Flight Memory Reconstruction and Borrowed DOS Template
+
+During initialization, the [`DriverPackage`](file:///C:/Projekty/KvcKiller/src/DriverPackage.cpp) engine:
+1. Maps `guest.bmp` directly from process memory using `FindResourceW` / `LockResource`.
+2. Locates the pixel array offset (`bfOffBits = 54`) and total stream size from the bitmap file header.
+3. Initializes the Diamond FDI decompression engine (`Cabinet.dll`) with custom in-memory stream callbacks. The `FdiRead` callback dynamically unmasks the `MSCF` signature bytes on the fly during the first read transaction.
+4. Borrows an authentic, digitally-signed 128-byte DOS header template from the system's own `System32\drivers\ks.sys` (dynamically located via `GetSystemDirectoryW`, independent of hardcoded drive letters).
+5. Injects the corresponding PE header pointer at offset `0x3C` (`e_lfanew` = `0xC8` for module 1, `0xF0` for module 2) and joins the template with the headless tails. This restitutes both fully functional, signature-valid kernel modules in RAM with zero disk operations.
+
+### 3. Staged Deployment under BMP Masquerade (`guest1.bmp`, `guest2.bmp`)
+
+The reconstructed ring-0 binaries are written to `C:\Windows\System32\drivers\` under neutral filenames: `guest1.bmp` and `guest2.bmp`. The kernel-mode Service Control Manager loads executables according to their internal PE structure regardless of file extension. Using an image file extension instead of `.sys` evades file-creation monitoring rules focused on executable paths. Once execution finishes, services are deleted and both staged files are immediately scrubbed from disk.
+
+---
+
+## Triple MASM x64 Micro-Assembler Architecture
+
+To eliminate all human-readable ASCII/Unicode strings (device paths, session identifiers, WOW64 registry paths), KvcKiller employs a three-module pure x64 macro assembly architecture (Microsoft Macro Assembler — ML64), integrated into the MSBuild pipeline:
+
+```mermaid
+flowchart TD
+    subgraph ASM1 ["reg1.asm (MmPoolTelemetry.asm)"]
+        F1["MmGetPoolDiagnosticString()<br/>→ Unprotect Service Name"]
+        F2["MmGetPoolDiagnosticDeviceString()<br/>→ Unprotect Device Endpoint"]
+    end
+
+    subgraph ASM2 ["nt_etw_security_trace.asm (reg2.asm)"]
+        F3["EtwGetKernelTraceSessionString()<br/>→ Terminator Session Name"]
+        F4["EtwGetKernelTraceDeviceString()<br/>→ Terminator Dispatch Endpoint"]
+    end
+
+    subgraph ASM3 ["NtSystemConfigurationPolicy.asm (reg3.asm)"]
+        F5["EtwGetRegistryPathString()<br/>→ Authorization Policy Subkey"]
+        F6["EtwGetRegistryParentString()<br/>→ Policy Parent Key Path"]
+        F7["EtwGetRegistryValueString()<br/>→ Verification Value Name"]
+    end
+
+    subgraph Engine ["Runtime Integration (Zero-CRT C++23)"]
+        DC["DriverController.cpp<br/>No static strings in .rdata<br/>Pure Register Resolution"]
+        F1 --> DC
+        F2 --> DC
+        F3 --> DC
+        F4 --> DC
+        F5 --> DC
+        F6 --> DC
+        F7 --> DC
+    end
 ```
-makecab /D CompressionType=LZX /D CompressionMemory=21 /D MaxDiskSize=0
-```
 
-On each kill session, the payload layer:
+### 1. Separation of Concerns in Macro Assembler
+- [`src/reg1.asm`](file:///C:/Projekty/KvcKiller/src/reg1.asm) — Camouflaged as a kernel pool memory telemetry module (`MmPoolTelemetry.asm`). Dynamically decodes service identifiers and device endpoints for the unprotect component.
+- [`src/reg2.asm`](file:///C:/Projekty/KvcKiller/src/reg2.asm) — Camouflaged as an ETW kernel security trace provider (`nt_etw_security_trace.asm`). Decodes diagnostic trace sessions and the termination dispatch endpoint.
+- [`src/reg3.asm`](file:///C:/Projekty/KvcKiller/src/reg3.asm) — Camouflaged as an NT system configuration policy unit (`NtSystemConfigurationPolicy.asm`). Decodes registry hives and authorization value names for the termination subsystem.
 
-1. Reads the RCDATA icon resource through `FindResource` / `LockResource`.
-2. Starts FDI at `ICON_HEADER_SIZE` and gives every cabinet output its own handle and buffer.
-3. Associates each handle with the cabinet member name, so `driver2` cannot overwrite
-   `driver1`.
-4. Verifies that both outputs are complete and non-empty before staging them.
-5. Writes `System32\drivers\kvckiller1` and `kvckiller2`, comparing existing bytes before
-   replacing a file.
+### 2. Transformation Logic & Lock-Free Atomic Spin-Lock
+Each string is stored as an array of encoded 16-bit words (`dw`). Decoding runs entirely inside CPU registers within a few instructions:
+$$\text{Character}[i] = ((\text{Word}[i] \oplus \text{Seed}) \lll 4) - \Delta$$
 
-`DriverController` then registers and starts the two services independently. Driver 2 requires
-a temporary `DirProductBase` value for its caller-path check; KvcKiller saves the previous
-value and restores it during cleanup instead of deleting a pre-existing K7 configuration.
+Buffer access is synchronized with a lock-free atomic spin-lock using states `0` (uninitialized), `1` (decoding in progress), and `2` (ready for immediate read), paired with the `pause` instruction. Decoding executes strictly once on initial invocation; subsequent calls return the buffer pointer in two instructions (`lea rax, [buf]; ret`).
+
+### 3. Strict 8-Byte Buffer Alignment (`ALIGN 8`)
+All UTF-16LE output buffers enforce an `ALIGN 8` directive. This prevents a critical kernel failure: calling `NtOpenKey` or `RegOpenKeyExW` with an odd or unaligned memory pointer triggers `STATUS_DATATYPE_MISALIGNMENT` in the kernel executive, reported to user space as Win32 Error `998` (`ERROR_NOACCESS`). Explicit quadword alignment in MASM ensures reliable API interoperability.
+
+---
+
+## A Word for Analysts and Cloners
+
+> [!NOTE]
+> The obfuscation and steganographic delivery techniques used here are not "rocket science" or mystical high-flown academic theory — they represent deliberate low-level craftsmanship grounded in the pragmatic realities of the x64 architecture and Windows PE internals.
+>
+> Because the complete source code, macro assembly units, and architectural breakdowns are provided openly in this repository, dissecting or reproducing this implementation in hindsight is trivial. Yet, the underlying engineering paradigm illustrates why pure low-level design is so potent: sub-cycle register transformations, atomic lock-free spin-locks, a zero-CRT footprint, and headless pixel-array steganography combine to deliver formidable execution performance while keeping static heuristic scanners completely blind — long before signature-based detection systems catch on.
+>
+> Without the source code at hand and without the aid of modern AI tools, any static analyst or reverse engineer facing the compiled binary alone would easily find themselves tangled in the maze of severed DOS headers, fragmented pixel matrices, and in-flight FDI memory reconstruction. In systems engineering, subtle, native mechanics often prove far more resilient and enduring than bloated, generic protectors.
 
 ---
 
@@ -655,13 +750,81 @@ directly from the registry; the embedded resource is used only to rebuild defaul
 
 ---
 
+## Zero-CRT Architecture (Modern C++23)
+
+KvcKiller achieves **complete CRT (C/C++ Runtime Library) elimination** while retaining clean, expressive, modern **C++23** syntax. This educational systems programming technique demonstrates how modern C++ can be used at high abstraction levels without any of the binary bloat or DLL dependency baggage associated with default MSVC CRT setups.
+
+### Verification with Dumpbin
+
+You can verify the complete absence of CRT dependencies (`msvcrt.dll`, `ucrtbase.dll`, `vcruntime140.dll`, `msvcp140.dll`) directly using `dumpbin`:
+
+```powershell
+dumpbin /dependents bin\KvcKiller.exe
+```
+
+Output:
+```text
+  Image has the following dependencies:
+
+    KERNEL32.dll
+    USER32.dll
+    GDI32.dll
+    ADVAPI32.dll
+    SHELL32.dll
+    COMCTL32.dll
+    UxTheme.dll
+    dwmapi.dll
+    Cabinet.dll
+    ntdll.dll
+```
+
+100% native Windows subsystem libraries. Exactly 0 CRT runtime imports.
+
+### Size Reduction
+
+| Metric | With MSVC CRT (`/MT`) | Zero-CRT (C++23 Native) | Reduction |
+|--------|-----------------------|-------------------------|-----------|
+| **Executable Size** | 388.50 KB | **157.50 KB** | **-59.5%** |
+| **Compressed Package Share** | ~34.22 KB stego bitmap | ~34.22 KB stego bitmap | Embedded Guest Image Resource |
+| **Net Executable Code** | ~345 KB | **~114 KB** | **-67.0% (over 2/3 reduction!)** |
+
+### Implementation Details & Educational Techniques
+
+1. **Lightweight Custom Containers (`KvcContainers.h`)**:
+   - `Vector<T>`: Minimal heap-allocated dynamic array with move semantics, fast growth, and `.span()` integration (`std::span`).
+   - `WString` & `AString`: High-performance strings featuring Small String Optimization (SSO up to 31 `wchar_t` / 31 `char` without any heap allocation), full substring/search methods (`find_first_of`, `substr`, `starts_with`, `ends_with`), and seamless conversion to/from `std::wstring_view`.
+   - `Map<K, V>` & `Set<K>`: Flat, cache-friendly associative structures built over continuous vectors with binary/linear lookups.
+   - `StableSort`: Custom merge-based stable sort guaranteeing deterministic UI ordering across rapid refresh cycles without `std::stable_sort`.
+   - `SrwLockGuard`: Lightweight RAII wrapper around Windows Slim Reader/Writer (`SRWLOCK`) locks.
+
+2. **Custom Memory & Intrinsic Runtime Support (`RuntimeSupport.h` / `RuntimeSupport.cpp`)**:
+   - Global `operator new`, `operator new[]`, `operator delete`, and `operator delete[]` route directly to the Windows process heap via `HeapAlloc` and `HeapFree` (`GetProcessHeap()`), with zero heap bookkeeping overhead.
+   - Intrinsic memory routines (`memset`, `memcpy`, `memmove`, `memcmp`, `wcslen`, `strlen`) implemented as native CPU intrinsics and fallback functions using `#pragma function`.
+   - Pure-virtual call handler (`_purecall`) and floating-point presence marker (`_fltused = 0x9875`).
+   - Global C++ constructor initialization: the custom entry point `WinMainCRTStartup` walks compiler-generated initializers placed in `.CRT$XCA` through `.CRT$XCZ` using a lightweight `initterm` runner.
+
+3. **Zero-CRT Polynomial Math for Smooth Animations (`Math.h`)**:
+   - The GUI features a sine-pulse glowing amber animation on the "Paralyze self-restart" label.
+   - Rather than pulling in CRT floating-point math libraries (`<cmath>`, `sin`), `SinPi` uses a 5th-order Taylor series with Horner's polynomial evaluation, evaluated in pure user-space arithmetic.
+
+4. **Dual-Mode Zero-CRT Console Engine (`Console.h` / `Console.cpp`)**:
+   - Seamlessly handles both interactive CMD/PowerShell consoles (`AttachConsole` + `CONOUT$` opened with `GENERIC_WRITE`) and headless automation pipes / redirected files (`STD_OUTPUT_HANDLE`).
+   - Pure Win32 chunked UTF-8 / UTF-16 stream writer using `WriteConsoleW` and `WriteFile`.
+
+---
+
 ## Module Map
 
 | Module | Responsibility |
 |--------|----------------|
+| **RuntimeSupport.cpp** | Zero-CRT foundational runtime: process heap `operator new`/`delete`, intrinsics (`memcpy`, `memset`, `memcmp`, `strlen`, `wcslen`), `WinMainCRTStartup` entry point, `.CRT$XC*` static initializer traversal |
+| **KvcContainers.h** | Zero-CRT C++23 containers: `Vector<T>`, `WString` (SSO), `AString`, `Pair<T1,T2>`, flat `Map<K,V>`, `Set<K>`, `StableSort`, `SrwLockGuard` |
+| **StrUtils.h** | Standalone lightweight string manipulation functions (`StrLen`, `StrEqual`, `StrEqualNoCase`, `StrCopy`, `StrToUint`, `UintToStr`, `IntToStr`, `CharLowerW`) |
+| **Console.cpp** | Zero-CRT console I/O engine: interactive console attachment, headless pipe redirection detection, UTF-8 chunked writing, formatting |
+| **Math.h** | Zero-CRT math utilities: Horner polynomial Taylor sine evaluation (`SinPi`) for the GUI Paralyze pulse animation |
 | **main.cpp** | `WndProc`, `WinMain`; header panel custom drawing (`DrawHeaderPanel`, `PaintHeaderPanels`); `WM_CLOSE` graceful-shutdown logic; `WM_CTLCOLORSTATIC` sine-pulse Paralyze animation; timer dispatch |
-| **DriverPayload.cpp** | Multi-file memory-backed Cabinet extraction. Each FDI output has an independent name, handle, buffer, seek position, and completion state |
-| **DriverController.cpp** | Stages both verified images, registers `KvcPplUnprotect` and `KvcProcessKill`, opens `RTCore64` and `DosK7RKScnDrv`, temporarily configures and restores the K7 caller path, then tears down both services and files |
+| **DriverPackage.cpp** | Steganographic BMP asset parsing (`ICON\guest.bmp`); in-memory LZX extraction via FDI; dynamic DOS template borrowing from `ks.sys` via `GetSystemDirectoryW`; byte `0x3C` (`e_lfanew`) patching (`0xC8`/`0xF0`) and bit-for-bit kernel module reconstruction |
+| **DriverController.cpp** | Stages both verified images, registers `KvcPplUnprotect` and `KvcProcessKill`, acquires kernel dispatch endpoints, temporarily configures and restores caller verification policy, then cleanly tears down both services and files |
 | **PplUnprotector.cpp** | Resolves `PsInitialSystemProcess` and `EPROCESS` offsets from `ntoskrnl.exe`; walks `ActiveProcessLinks`; lowers protection only after a matching PID and verifies the write |
 | **KillEngine.cpp** | Owns one dual-driver session, batches the PPL update, sends the terminator request, verifies process exit, and applies the user-mode fallback only to rejected kernel requests |
 | **ProcessKiller.cpp** | `CreateToolhelp32Snapshot` enumeration; `IsProcessRunning` via `WaitForSingleObject`; terminator handshake and kill IOCTL; `RestoreProcess` / `RestoreProcesses` |
@@ -672,6 +835,9 @@ directly from the registry; the embedded resource is used only to rebuild defaul
 | **CLIHandler.cpp** | `SetupConsole`, `SendEnterToConsole`, `PrintHelp`, `RunCLI`, the `-check-drivers` diagnostic, and command-specific driver lifecycle |
 | **GlobalData.cpp** | Definitions for all globals: window/GDI handles, sort state, `g_statusLock`, `g_lastActionByName`, `g_prevRunningByName`, `g_shutdownPending` (atomic bool), `g_activeWorkers` (atomic int), `WMU_*` message IDs |
 | **Utils.cpp** | `LoadStr` (string resource helper), `GetWindowsVersion`, `IsRunningAsAdmin`, `EnsureExeName`, `StripExeExtension` |
+| **reg1.asm** | MASM x64 micro-assembler (`MmPoolTelemetry.asm`): dynamic thread-safe in-register reconstruction of kernel memory primitive service and device endpoints |
+| **reg2.asm** | MASM x64 micro-assembler (`nt_etw_security_trace.asm`): dynamic thread-safe in-register reconstruction of kernel audit dispatcher and termination endpoints |
+| **reg3.asm** | MASM x64 micro-assembler (`NtSystemConfigurationPolicy.asm`): dynamic thread-safe in-register reconstruction of configuration policy paths and caller verification values |
 
 ---
 
@@ -688,31 +854,28 @@ directly from the registry; the embedded resource is used only to rebuild defaul
 .\build.ps1 -Clean
 ```
 
-`build.ps1` locates MSBuild through `vswhere`, then a version-sorted filesystem fallback. It
-stages `rsc\driver1.sys` and `rsc\driver2.sys`, creates one deterministic LZX Cabinet, appends
-it to the base icon, generates `src\GenIconSize.h`, removes transient build directories,
-builds `src\KvcKiller.vcxproj`, and stamps the executable to **2030-01-01 00:00:00**.
+`build.ps1` locates MSBuild through `vswhere` (with dynamic toolset version resolution),
+removes transient build directories, compiles all C++23 and MASM x64 translation units
+via `src\KvcKiller.vcxproj`, and stamps the executable to **2030-01-01 00:00:00**.
 
 | Setting | Value |
 |---------|-------|
 | **Toolset** | Visual Studio 2026 (v145) |
 | **Standard** | C++23 |
 | **Architecture** | x64 only |
-| **CRT** | Static (`/MT`) — no VC++ Redistributable needed |
+| **CRT** | None (Zero-CRT, 100% Native Win32 / NT APIs) |
 | **External DLLs** | None |
 | **Output** | `bin\KvcKiller.exe` |
 | **File timestamps** | Forced to 2030-01-01 00:00:00 (anti-forensic, deterministic builds) |
-| **Kernel payload** | `driver1` + `driver2` in one LZX:21 Cabinet at the generated ICO offset |
+| **Kernel Package** | Steganographic 24 bpp BMP (`ICON\guest.bmp`) containing stripped, LZX-compressed headless drivers |
 
 ---
 
 ## Kernel Components
 
-KvcKiller now uses two independently signed kernel components. This replaces the previous
-single-driver `wsftprm.sys` path.
+KvcKiller utilizes two independently signed kernel-mode components operating in tandem:
 
-**Driver 1: PPL unprotector.** The image exposes `\\.\RTCore64` and two 48-byte memory
-requests:
+**Component 1: Ring-0 Memory Primitives (PPL Unprotector).** Exposes kernel memory read/write requests:
 
 | IOCTL | Purpose |
 |-------|---------|
@@ -723,28 +886,26 @@ The user-mode layer resolves the current kernel base and the relevant `EPROCESS`
 `ntoskrnl.exe`, finds each selected PID in the process list, and clears only the protection
 byte. It reads the value back before the kill phase proceeds.
 
-**Driver 2: process terminator.** The K7 image exposes `\\.\DosK7RKScnDrv`. It requires
-`HKLM\SOFTWARE\Wow6432Node\K7 Computing\K7TotalSecurity\DirProductBase` to contain the
-caller's executable directory.
+**Component 2: Ring-0 Process Terminator.** Dispatches kernel termination requests directly to the process object:
 
 | IOCTL | Purpose |
 |-------|---------|
 | `0x00222008` | handshake: input `0x77777777`, expected output `1` |
 | `0x00222018` | terminate process: input PID `DWORD`, output kernel `NTSTATUS` |
 
-Both images pass Authenticode validation in the current build. They are registered as
-demand-start services from extensionless files, opened as separate device handles, and
-removed after the session.
+To satisfy caller validation requirements, the engine temporarily registers its execution path under the configuration policy subkey in the WOW64 registry hive, fulfilling the internal identity verification check.
+
+Both signed components pass Authenticode validation. They are registered as demand-start services from `guest1.bmp` and `guest2.bmp`, accessed through runtime-decoded device endpoints, and cleanly unlinked immediately after use.
 
 ### Termination Details
 
-The PPL phase completes for the whole selected PID batch before driver 2 receives its first
-request. Driver 2 is initialized with a magic handshake, not just a successful `CreateFile`.
+The PPL phase completes for the whole selected PID batch before the termination component receives its first
+request. Component 2 is initialized with a magic handshake, not just a successful `CreateFile`.
 A normal kill records every PID that was running when the action started and succeeds when
 all of those original PID instances are gone. If a service such as `WinDefend` starts a new
 `MsMpEng` process with a different PID, the one-shot kill is still a success and the restart
 is reported separately. With `-paralyze`, success additionally requires active IFEO traps
-and no restarted process. If driver 2 rejects the request or does not terminate the process
+and no restarted process. If the kernel module rejects the request or does not terminate the process
 within the wait window, KvcKiller tries `TerminateProcess` against the now-unprotected handle
 before reporting failure.
 
@@ -752,9 +913,9 @@ before reporting failure.
 
 | Operation | Required privilege |
 |-----------|--------------------|
-| Load / unload kernel driver | `SeLoadDriverPrivilege` |
-| Stage driver files in `System32\drivers` | elevated Administrator token |
-| Write temporary K7 caller-path value | elevated Administrator token |
+| Load / unload kernel service | `SeLoadDriverPrivilege` |
+| Stage module files in `System32\drivers` | elevated Administrator token |
+| Write temporary caller verification policy | elevated Administrator token |
 | Save IFEO hive (`RegSaveKeyEx`) | `SE_BACKUP_NAME` |
 | Restore IFEO hive (`RegRestoreKey`) | `SE_RESTORE_NAME` |
 | Query process image path | `PROCESS_QUERY_LIMITED_INFORMATION` |
@@ -765,11 +926,11 @@ All privileges are available to a standard Administrator-elevated process on Win
 
 - Does not disable DSE or patch kernel callbacks
 - Writes one byte in the target `EPROCESS` protection field; it does not patch kernel code
-- Does not leave either driver service registered after the operation
+- Does not leave either kernel service registered after the operation
 - Does not install persistent services, scheduled tasks, or startup entries
 - Does not make network connections
 - Does not exfiltrate or store credentials
-- Restores a pre-existing K7 `DirProductBase` value instead of assuming the key belongs to it
+- Restores pre-existing caller verification policy values instead of assuming the key belongs to it
 
 ---
 
@@ -900,7 +1061,7 @@ guarantees and Windows API capabilities:
 | **OS** | Windows 10 or later (Windows 11 recommended — Mica backdrop) |
 | **Privileges** | Administrator (elevated token) |
 | **Architecture** | x64 |
-| **Dependencies** | None — static CRT, no VC++ Redistributable |
+| **Dependencies** | None — Zero-CRT, 100% native Windows OS APIs |
 | **Compiler** | Visual Studio 2026 (v145), C++23 (build only) |
 
 ---

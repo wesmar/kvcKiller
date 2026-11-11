@@ -2,9 +2,6 @@
 #include "DriverController.h"
 #include "ProcessKiller.h"
 
-#include <chrono>
-#include <thread>
-
 HANDLE KillEngine::g_pplDevice = INVALID_HANDLE_VALUE;
 HANDLE KillEngine::g_terminatorDevice = INVALID_HANDLE_VALUE;
 bool KillEngine::g_pplReady = false;
@@ -46,8 +43,8 @@ bool KillEngine::HasProcessTerminator() {
     return g_terminatorReady;
 }
 
-bool KillEngine::LowerProtection(const std::vector<DWORD>& pids,
-                                 std::vector<PplTargetResult>& results) {
+bool KillEngine::LowerProtection(const Vector<DWORD>& pids,
+                                 Vector<PplTargetResult>& results) {
     if (!g_pplReady) {
         results.clear();
         return false;
@@ -80,7 +77,7 @@ KillAttemptResult KillEngine::Kill(DWORD pid) {
                 result.terminated = true;
                 return result;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            Sleep(50);
         }
     }
 

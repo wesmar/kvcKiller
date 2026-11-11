@@ -13,8 +13,7 @@
 #pragma once
 
 #include <windows.h>
-#include <vector>
-#include <string>
+#include "KvcContainers.h"
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -22,16 +21,16 @@
 
 /// Describes a single process instance found in the system snapshot.
 struct ProcessInfo {
-    DWORD        pid;      ///< Process identifier; 0 when the process is not running.
-    std::wstring name;     ///< Base executable name as reported by the snapshot (e.g. "svchost.exe").
-    bool         running;  ///< True when a live instance with this PID was found.
+    DWORD   pid = 0;   ///< Process identifier; 0 when the process is not running.
+    WString name;      ///< Base executable name as reported by the snapshot (e.g. "svchost.exe").
+    bool    running = false;  ///< True when a live instance with this PID was found.
 };
 
 /// Cached SCM entry used to avoid redundant service-database queries during
 /// batch restore operations.
 struct ServiceCacheEntry {
-    std::wstring serviceName;  ///< SCM service name.
-    std::wstring binaryPath;   ///< ImagePath value from the service configuration.
+    WString serviceName;  ///< SCM service name.
+    WString binaryPath;   ///< ImagePath value from the service configuration.
 };
 
 // ---------------------------------------------------------------------------
@@ -51,8 +50,8 @@ public:
     /// Enumerates all running processes and returns an entry for each name in
     /// \p processNames.  Entries whose process is not currently running are
     /// included with pid = 0 and running = false.
-    static std::vector<ProcessInfo> FindProcesses(
-        const std::vector<std::wstring>& processNames);
+    static Vector<ProcessInfo> FindProcesses(
+        const Vector<WString>& processNames);
 
     /// Returns true when a process with the given \p pid still exists in the
     /// system process table (i.e. has not yet fully exited).
@@ -87,14 +86,14 @@ public:
     /// the appropriate method (SCM start, ShellExecuteEx, or direct CreateProcess).
     /// Returns 0 on success, a non-zero error code on failure.
     /// Intended for single-process CLI restore calls.
-    static int RestoreProcess(const std::wstring& exeName);
+    static int RestoreProcess(const WString& exeName);
 
     /// Batch variant of RestoreProcess() optimised for GUI use: resolves paths
     /// and launches all processes in \p exeNames concurrently where possible,
     /// writing per-process result codes into the parallel \p results vector.
     /// \p results is resized to match \p exeNames before the operation begins.
-    static void RestoreProcesses(const std::vector<std::wstring>& exeNames,
-                                  std::vector<int>& results);
+    static void RestoreProcesses(const Vector<WString>& exeNames,
+                                 Vector<int>& results);
 
     // -----------------------------------------------------------------------
     // Default target list
@@ -103,5 +102,5 @@ public:
     /// Returns the factory-default list of target process names (identical to
     /// the seed list compiled into the resource).  Used by the CLI "--list"
     /// command and first-run initialisation.
-    static std::vector<std::wstring> GetDefaultTargetList();
+    static Vector<WString> GetDefaultTargetList();
 };

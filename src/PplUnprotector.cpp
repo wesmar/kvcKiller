@@ -1,8 +1,7 @@
 #include "PplUnprotector.h"
+#include "RuntimeSupport.h"
 
-#include <algorithm>
 #include <cstdint>
-#include <cstring>
 
 #pragma comment(lib, "ntdll.lib")
 
@@ -58,6 +57,10 @@ EprocessOffsets g_offsets;
 ULONG_PTR g_kernelBase = 0;
 bool g_ready = false;
 
+#ifndef NTSTATUS
+typedef LONG NTSTATUS;
+#endif
+
 extern "C" NTSTATUS NTAPI NtQuerySystemInformation(
     ULONG systemInformationClass,
     PVOID systemInformation,
@@ -85,7 +88,7 @@ bool ReadDisplacementAt(const BYTE* code, size_t size, size_t opcode,
     if (opcode + 6 > size) return false;
     if (code[opcode] != first || code[opcode + 1] != second) return false;
 
-    std::memcpy(&displacement, code + opcode + 2, sizeof(displacement));
+    memcpy(&displacement, code + opcode + 2, sizeof(displacement));
     return displacement > 0 && displacement < 0x4000;
 }
 
@@ -108,7 +111,7 @@ bool GetKernelBase(ULONG_PTR& base) {
     NtQuerySystemInformation(11, nullptr, 0, &required);
     if (required == 0) return false;
 
-    std::vector<BYTE> buffer(required + 4096);
+    Vector<BYTE> buffer(required + 4096);
     const NTSTATUS status = NtQuerySystemInformation(
         11, buffer.data(), static_cast<ULONG>(buffer.size()), &required
     );
@@ -232,14 +235,14 @@ bool IsKernelAddress(ULONG_PTR address) {
     return (address >> 48) == 0xFFFF;
 }
 
-ResolvedTarget* FindTarget(std::vector<ResolvedTarget>& targets, DWORD pid) {
+ResolvedTarget* FindTarget(Vector<ResolvedTarget>& targets, DWORD pid) {
     for (ResolvedTarget& target : targets) {
         if (target.pid == pid) return &target;
     }
     return nullptr;
 }
 
-bool WalkProcessList(HANDLE device, std::vector<ResolvedTarget>& targets) {
+bool WalkProcessList(HANDLE device, Vector<ResolvedTarget>& targets) {
     const ULONG_PTR psInitialSystemProcess = g_kernelBase
         + g_offsets.psInitialSystemProcessRva;
 
@@ -315,7 +318,7 @@ bool PplUnprotector::Probe(DWORD pid, PplTargetResult& result) {
     result.pid = pid;
     if (!g_ready || pid == 0) return false;
 
-    std::vector<ResolvedTarget> targets;
+    Vector<ResolvedTarget> targets;
     ResolvedTarget target{};
     target.pid = pid;
     targets.push_back(target);
@@ -329,12 +332,12 @@ bool PplUnprotector::Probe(DWORD pid, PplTargetResult& result) {
     return found.found;
 }
 
-bool PplUnprotector::LowerProtection(const std::vector<DWORD>& pids,
-                                     std::vector<PplTargetResult>& results) {
+bool PplUnprotector::LowerProtection(const Vector<DWORD>& pids,
+                                     Vector<PplTargetResult>& results) {
     results.clear();
     results.reserve(pids.size());
 
-    std::vector<ResolvedTarget> targets;
+    Vector<ResolvedTarget> targets;
     targets.reserve(pids.size());
     for (DWORD pid : pids) {
         if (pid == 0) continue;

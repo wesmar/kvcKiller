@@ -7,14 +7,14 @@
 #pragma once
 
 #include <windows.h>
-#include <string>
+#include "KvcContainers.h"
 
 // ---------------------------------------------------------------------------
 // String resources
 // ---------------------------------------------------------------------------
 
 /// Load a string resource by ID from the current module.
-std::wstring LoadStr(UINT id);
+WString LoadStr(UINT id);
 
 // ---------------------------------------------------------------------------
 // OS / environment detection
@@ -31,29 +31,29 @@ bool IsRunningAsAdmin();
 // ---------------------------------------------------------------------------
 
 /// Returns a lower-case copy of \p value.
-std::wstring ToLowerCopy(std::wstring value);
+WString ToLowerCopy(WString value);
 
 /// Strips a trailing ".exe" suffix (case-insensitive).
-std::wstring StripExeExtension(const std::wstring& value);
+WString StripExeExtension(const WString& value);
 
 /// Ensures the name ends with ".exe" (strips and re-appends).
-std::wstring EnsureExeName(const std::wstring& value);
+WString EnsureExeName(const WString& value);
 
 /// Returns the canonical map key: lower-case name without ".exe".
-std::wstring NormalizeProcessKey(const std::wstring& value);
+WString NormalizeProcessKey(const WString& value);
 
 /// Formats a PID as a string; returns L"-" for PID 0.
-std::wstring FormatPid(DWORD pid);
+WString FormatPid(DWORD pid);
 
 // ---------------------------------------------------------------------------
 // Thread-safe per-process state (backed by globals in GlobalData)
 // ---------------------------------------------------------------------------
 
-void         StoreLastAction(const std::wstring& processName, const std::wstring& action);
-std::wstring ReadLastAction(const std::wstring& processName);
+void    StoreLastAction(const WString& processName, const WString& action);
+WString ReadLastAction(const WString& processName);
 
-bool WasRunningPreviously(const std::wstring& processName);
-void StoreRunningState(const std::wstring& processName, bool running);
+bool WasRunningPreviously(const WString& processName);
+void StoreRunningState(const WString& processName, bool running);
 
 // ---------------------------------------------------------------------------
 // Cross-thread UI helpers

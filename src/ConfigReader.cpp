@@ -11,16 +11,12 @@
 // On first run, ReadProcessList seeds the Targets key from the IDR_DEFAULT_TARGETS
 // embedded resource (a .ini-style text file in [Targets] format).
 //
-// All public methods acquire g_registryMutex so they are safe to call from
+// All public methods acquire g_registryLock so they are safe to call from
 // any thread.  Private helpers assume the lock is already held.
 
 #include "ConfigReader.h"
 #include "Resource.h"
-#include <algorithm>
-#include <cwctype>
-#include <mutex>
-#include <string>
-#include <vector>
+#include "StrUtils.h"
 
 namespace {
 
@@ -35,23 +31,24 @@ constexpr wchar_t kTargetsValue[] = L"List";
 constexpr wchar_t kHistoryValue[] = L"Entries";
 constexpr size_t  kMaxHistoryEntries = 16; // oldest entries are dropped when the ring fills
 
-// Single mutex guards all registry access from this module.
-std::mutex g_registryMutex;
+// Single SRW lock guards all registry access from this module.
+SRWLOCK g_registryLock = SRWLOCK_INIT;
 
 // --- String utility functions (local to this TU) ---
 
-// Returns a lowercase copy using wide-character towlower.
-std::wstring ToLowerCopy(std::wstring value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-        [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+// Returns a lowercase copy using StrUtils::CharLowerW.
+WString ToLowerCopy(WString value) {
+    for (size_t i = 0; i < value.size(); ++i) {
+        value[i] = StrUtils::CharLowerW(value[i]);
+    }
     return value;
 }
 
 // Strips leading/trailing whitespace characters (space, tab, CR, LF).
-std::wstring TrimWhitespace(const std::wstring& value) {
+WString TrimWhitespace(const WString& value) {
     const size_t start = value.find_first_not_of(L" \t\r\n");
-    if (start == std::wstring::npos) {
-        return L"";
+    if (start == WString::npos) {
+        return WString();
     }
     const size_t end = value.find_last_not_of(L" \t\r\n");
     return value.substr(start, end - start + 1);
@@ -59,9 +56,9 @@ std::wstring TrimWhitespace(const std::wstring& value) {
 
 // Trims whitespace and removes a trailing ".exe" suffix (case-insensitive).
 // Used to normalize user-supplied names before storing them.
-std::wstring StripExeExtension(const std::wstring& value) {
-    const std::wstring trimmed = TrimWhitespace(value);
-    const std::wstring lower   = ToLowerCopy(trimmed);
+WString StripExeExtension(const WString& value) {
+    const WString trimmed = TrimWhitespace(value);
+    const WString lower   = ToLowerCopy(trimmed);
     if (lower.length() > 4 && lower.substr(lower.length() - 4) == L".exe") {
         return trimmed.substr(0, trimmed.length() - 4);
     }
@@ -73,10 +70,10 @@ std::wstring StripExeExtension(const std::wstring& value) {
 //   "MsMpEng.exe" → "msmpeng.exe"
 // This makes ReadProcessPath / WriteProcessPath case-insensitive and consistent
 // regardless of whether the caller includes the extension.
-std::wstring NormalizePathValueName(const std::wstring& processName) {
-    const std::wstring stripped = StripExeExtension(processName);
+WString NormalizePathValueName(const WString& processName) {
+    const WString stripped = StripExeExtension(processName);
     if (stripped.empty()) {
-        return L"";
+        return WString();
     }
     return ToLowerCopy(stripped) + L".exe";
 }
@@ -104,15 +101,15 @@ bool EnsureRegistryScaffold() {
 //   3. Plain UTF-8 or ACP — try UTF-8 first; fall back to system ANSI code page.
 // Used for the embedded IDR_DEFAULT_TARGETS resource which may be saved in
 // different encodings depending on the editor.
-std::wstring DecodeTextBytes(const BYTE* data, size_t size) {
+WString DecodeTextBytes(const BYTE* data, size_t size) {
     if (data == nullptr || size == 0) {
-        return L"";
+        return WString();
     }
 
     // UTF-16 LE BOM
     if (size >= 2 && data[0] == 0xFF && data[1] == 0xFE) {
-        return std::wstring(reinterpret_cast<const wchar_t*>(data + 2),
-                            (size - 2) / sizeof(wchar_t));
+        return WString(reinterpret_cast<const wchar_t*>(data + 2),
+                       (size - 2) / sizeof(wchar_t));
     }
 
     UINT codePage = CP_UTF8;
@@ -138,10 +135,11 @@ std::wstring DecodeTextBytes(const BYTE* data, size_t size) {
     }
 
     if (wideLen <= 0) {
-        return L"";
+        return WString();
     }
 
-    std::wstring text(wideLen, L'\0');
+    WString text;
+    text.resize(static_cast<size_t>(wideLen));
     MultiByteToWideChar(codePage, flags,
         reinterpret_cast<LPCCH>(data + offset),
         static_cast<int>(size - offset),
@@ -151,25 +149,17 @@ std::wstring DecodeTextBytes(const BYTE* data, size_t size) {
 
 // Parses a .ini-style process list text into a vector of bare process names
 // (no .exe extension, no whitespace).
-//
-// Format:
-//   ; comment
-//   [Targets]
-//   SomeName.exe       ← bare name or key=value both accepted
-//   AnotherProcess
-//
-// Lines outside [Targets] sections and blank/comment lines are ignored.
-std::vector<std::wstring> ParseProcessListText(const std::wstring& contents) {
-    std::vector<std::wstring> processes;
+Vector<WString> ParseProcessListText(const WString& contents) {
+    Vector<WString> processes;
     bool   inTargets = false;
     size_t cursor    = 0;
 
     while (cursor <= contents.size()) {
         const size_t next = contents.find_first_of(L"\r\n", cursor);
-        std::wstring line = contents.substr(cursor,
-            next == std::wstring::npos ? std::wstring::npos : next - cursor);
+        WString line = contents.substr(cursor,
+            next == WString::npos ? WString::npos : next - cursor);
 
-        if (next == std::wstring::npos) {
+        if (next == WString::npos) {
             cursor = contents.size() + 1;
         } else {
             cursor = next + 1;
@@ -196,7 +186,7 @@ std::vector<std::wstring> ParseProcessListText(const std::wstring& contents) {
 
         // Accept both "Name.exe" and "key=Name.exe" (ini assignment syntax).
         const size_t eq = line.find(L'=');
-        if (eq != std::wstring::npos) {
+        if (eq != WString::npos) {
             line = line.substr(eq + 1);
         }
 
@@ -213,7 +203,7 @@ std::vector<std::wstring> ParseProcessListText(const std::wstring& contents) {
 
 // Reads a REG_MULTI_SZ value and splits it into individual strings.
 // Returns an empty vector if the value is missing or empty.
-std::vector<std::wstring> ReadMultiStringValue(const wchar_t* keyPath, const wchar_t* valueName) {
+Vector<WString> ReadMultiStringValue(const wchar_t* keyPath, const wchar_t* valueName) {
     DWORD bytes = 0;
     LONG status = RegGetValueW(HKEY_CURRENT_USER, keyPath, valueName, RRF_RT_REG_MULTI_SZ,
                                nullptr, nullptr, &bytes);
@@ -221,20 +211,19 @@ std::vector<std::wstring> ReadMultiStringValue(const wchar_t* keyPath, const wch
         return {};
     }
 
-    std::vector<wchar_t> buffer((bytes / sizeof(wchar_t)) + 1, L'\0');
+    Vector<wchar_t> buffer;
+    buffer.resize((bytes / sizeof(wchar_t)) + 1, L'\0');
     status = RegGetValueW(HKEY_CURRENT_USER, keyPath, valueName, RRF_RT_REG_MULTI_SZ,
                           nullptr, buffer.data(), &bytes);
     if (status != ERROR_SUCCESS) {
         return {};
     }
 
-    // REG_MULTI_SZ is a sequence of null-terminated strings followed by an extra
-    // null — walk it string by string until we hit the double-null terminator.
-    std::vector<std::wstring> values;
+    Vector<WString> values;
     const wchar_t* current = buffer.data();
     while (*current != L'\0') {
-        values.emplace_back(current);
-        current += wcslen(current) + 1;
+        values.push_back(WString(current));
+        current += StrUtils::StrLen(current) + 1;
     }
 
     return values;
@@ -242,7 +231,7 @@ std::vector<std::wstring> ReadMultiStringValue(const wchar_t* keyPath, const wch
 
 // Serialises a vector of strings into a REG_MULTI_SZ value and writes it.
 bool WriteMultiStringValue(const wchar_t* keyPath, const wchar_t* valueName,
-                           const std::vector<std::wstring>& values) {
+                           const Vector<WString>& values) {
     HKEY hKey = nullptr;
     const LONG createStatus = RegCreateKeyExW(HKEY_CURRENT_USER, keyPath, 0, nullptr, 0,
                                               KEY_READ | KEY_WRITE, nullptr, &hKey, nullptr);
@@ -251,7 +240,7 @@ bool WriteMultiStringValue(const wchar_t* keyPath, const wchar_t* valueName,
     }
 
     // Build the double-null-terminated buffer.
-    std::vector<wchar_t> buffer;
+    Vector<wchar_t> buffer;
     size_t totalChars = 1; // for the final extra null
     for (const auto& value : values) {
         totalChars += value.size() + 1;
@@ -259,7 +248,9 @@ bool WriteMultiStringValue(const wchar_t* keyPath, const wchar_t* valueName,
     buffer.reserve(totalChars);
 
     for (const auto& value : values) {
-        buffer.insert(buffer.end(), value.begin(), value.end());
+        for (size_t i = 0; i < value.size(); ++i) {
+            buffer.push_back(value[i]);
+        }
         buffer.push_back(L'\0');
     }
     buffer.push_back(L'\0'); // double-null terminator
@@ -271,27 +262,28 @@ bool WriteMultiStringValue(const wchar_t* keyPath, const wchar_t* valueName,
     return status == ERROR_SUCCESS;
 }
 
-// Reads a single REG_SZ string value.  Returns an empty string if missing.
-std::wstring ReadStringValue(const wchar_t* keyPath, const std::wstring& valueName) {
+// Reads a single REG_SZ string value. Returns an empty string if missing.
+WString ReadStringValue(const wchar_t* keyPath, const WString& valueName) {
     DWORD bytes = 0;
     LONG status = RegGetValueW(HKEY_CURRENT_USER, keyPath, valueName.c_str(), RRF_RT_REG_SZ,
                                nullptr, nullptr, &bytes);
     if (status != ERROR_SUCCESS || bytes < sizeof(wchar_t)) {
-        return L"";
+        return WString();
     }
 
-    std::vector<wchar_t> buffer((bytes / sizeof(wchar_t)) + 1, L'\0');
+    Vector<wchar_t> buffer;
+    buffer.resize((bytes / sizeof(wchar_t)) + 1, L'\0');
     status = RegGetValueW(HKEY_CURRENT_USER, keyPath, valueName.c_str(), RRF_RT_REG_SZ,
                           nullptr, buffer.data(), &bytes);
     if (status != ERROR_SUCCESS) {
-        return L"";
+        return WString();
     }
 
-    return buffer.data();
+    return WString(buffer.data());
 }
 
 // Writes a single REG_SZ string value, creating the key if necessary.
-bool WriteStringValue(const wchar_t* keyPath, const std::wstring& valueName, const std::wstring& value) {
+bool WriteStringValue(const wchar_t* keyPath, const WString& valueName, const WString& value) {
     HKEY hKey = nullptr;
     const LONG createStatus = RegCreateKeyExW(HKEY_CURRENT_USER, keyPath, 0, nullptr, 0,
                                               KEY_READ | KEY_WRITE, nullptr, &hKey, nullptr);
@@ -307,9 +299,7 @@ bool WriteStringValue(const wchar_t* keyPath, const std::wstring& valueName, con
 }
 
 // Loads and parses the IDR_DEFAULT_TARGETS resource embedded in the executable.
-// This is the hard-coded default target list shipped with the binary, used to
-// seed the registry on first run.
-std::vector<std::wstring> LoadSeedTargetsFromResource() {
+Vector<WString> LoadSeedTargetsFromResource() {
     HRSRC hResource = FindResourceW(GetModuleHandleW(nullptr),
                                     MAKEINTRESOURCEW(IDR_DEFAULT_TARGETS), RT_RCDATA);
     if (!hResource) {
@@ -327,31 +317,49 @@ std::vector<std::wstring> LoadSeedTargetsFromResource() {
         return {};
     }
 
-    const std::wstring text = DecodeTextBytes(reinterpret_cast<const BYTE*>(raw), size);
+    const WString text = DecodeTextBytes(reinterpret_cast<const BYTE*>(raw), size);
     return ParseProcessListText(text);
 }
 
 // Formats a single history entry as a pipe-delimited string:
 //   "2024-03-15 14:22:01 | KILL | MsMpEng | C:\...\MsMpEng.exe"
-// The path field is omitted if fullPath is empty or whitespace-only.
-std::wstring BuildHistoryEntry(const std::wstring& action,
-                               const std::wstring& processName,
-                               const std::wstring& fullPath) {
+WString BuildHistoryEntry(const WString& action,
+                          const WString& processName,
+                          const WString& fullPath) {
     SYSTEMTIME localTime{};
     GetLocalTime(&localTime);
 
     wchar_t timestamp[32]{};
-    swprintf_s(timestamp, L"%04u-%02u-%02u %02u:%02u:%02u",
-               localTime.wYear, localTime.wMonth, localTime.wDay,
-               localTime.wHour, localTime.wMinute, localTime.wSecond);
+    auto fmt2 = [](wchar_t* p, WORD val) {
+        p[0] = static_cast<wchar_t>(L'0' + (val / 10));
+        p[1] = static_cast<wchar_t>(L'0' + (val % 10));
+    };
+    auto fmt4 = [](wchar_t* p, WORD val) {
+        p[0] = static_cast<wchar_t>(L'0' + (val / 1000));
+        p[1] = static_cast<wchar_t>(L'0' + ((val / 100) % 10));
+        p[2] = static_cast<wchar_t>(L'0' + ((val / 10) % 10));
+        p[3] = static_cast<wchar_t>(L'0' + (val % 10));
+    };
+    fmt4(timestamp, localTime.wYear);
+    timestamp[4] = L'-';
+    fmt2(timestamp + 5, localTime.wMonth);
+    timestamp[7] = L'-';
+    fmt2(timestamp + 8, localTime.wDay);
+    timestamp[10] = L' ';
+    fmt2(timestamp + 11, localTime.wHour);
+    timestamp[13] = L':';
+    fmt2(timestamp + 14, localTime.wMinute);
+    timestamp[16] = L':';
+    fmt2(timestamp + 17, localTime.wSecond);
+    timestamp[19] = L'\0';
 
-    std::wstring entry = timestamp;
+    WString entry = timestamp;
     entry += L" | ";
     entry += action;
     entry += L" | ";
     entry += StripExeExtension(processName);
 
-    const std::wstring trimmedPath = TrimWhitespace(fullPath);
+    const WString trimmedPath = TrimWhitespace(fullPath);
     if (!trimmedPath.empty()) {
         entry += L" | ";
         entry += trimmedPath;
@@ -361,12 +369,12 @@ std::wstring BuildHistoryEntry(const std::wstring& action,
 }
 
 // Strips .exe from every entry so the stored list is always bare names.
-std::vector<std::wstring> NormalizeTargets(const std::vector<std::wstring>& processes) {
-    std::vector<std::wstring> normalized;
+Vector<WString> NormalizeTargets(const Vector<WString>& processes) {
+    Vector<WString> normalized;
     normalized.reserve(processes.size());
 
     for (const auto& process : processes) {
-        const std::wstring stripped = StripExeExtension(process);
+        const WString stripped = StripExeExtension(process);
         if (!stripped.empty()) {
             normalized.push_back(stripped);
         }
@@ -382,16 +390,13 @@ std::vector<std::wstring> NormalizeTargets(const std::vector<std::wstring>& proc
 // ===========================================================================
 
 // Returns the built-in seed list without touching the registry.
-// Used by ProcessKiller::GetDefaultTargetList() and for first-run seeding.
-std::vector<std::wstring> ConfigReader::ReadSeedProcessList() {
+Vector<WString> ConfigReader::ReadSeedProcessList() {
     return LoadSeedTargetsFromResource();
 }
 
 // Returns the target process list.
-// If the registry key is empty (first run), seeds it from the embedded resource
-// and writes the seed back so subsequent reads are fast registry-only reads.
-std::vector<std::wstring> ConfigReader::ReadProcessList() {
-    std::lock_guard<std::mutex> lock(g_registryMutex);
+Vector<WString> ConfigReader::ReadProcessList() {
+    SrwLockGuard lock(g_registryLock);
     if (!EnsureRegistryScaffold()) {
         return {};
     }
@@ -409,10 +414,9 @@ std::vector<std::wstring> ConfigReader::ReadProcessList() {
     return processes;
 }
 
-// Overwrites the stored target list.  Names are normalised (extension stripped)
-// before writing.
-bool ConfigReader::WriteProcessList(const std::vector<std::wstring>& processes) {
-    std::lock_guard<std::mutex> lock(g_registryMutex);
+// Overwrites the stored target list.
+bool ConfigReader::WriteProcessList(const Vector<WString>& processes) {
+    SrwLockGuard lock(g_registryLock);
     if (!EnsureRegistryScaffold()) {
         return false;
     }
@@ -421,25 +425,23 @@ bool ConfigReader::WriteProcessList(const std::vector<std::wstring>& processes) 
 }
 
 // Returns the last-known full executable path for a given process name.
-// processName may be with or without .exe — NormalizePathValueName handles both.
-std::wstring ConfigReader::ReadProcessPath(const std::wstring& processName) {
-    std::lock_guard<std::mutex> lock(g_registryMutex);
+WString ConfigReader::ReadProcessPath(const WString& processName) {
+    SrwLockGuard lock(g_registryLock);
     if (!EnsureRegistryScaffold()) {
-        return L"";
+        return WString();
     }
 
-    const std::wstring valueName = NormalizePathValueName(processName);
+    const WString valueName = NormalizePathValueName(processName);
     if (valueName.empty()) {
-        return L"";
+        return WString();
     }
 
     return ReadStringValue(kPathsKey, valueName);
 }
 
 // Enumerates all entries in the Paths key and returns them as a vector.
-// Used by ListViewManager to build the "previously seen non-built-in" rows.
-std::vector<ProcessPathEntry> ConfigReader::ReadKnownProcessPaths() {
-    std::lock_guard<std::mutex> lock(g_registryMutex);
+Vector<ProcessPathEntry> ConfigReader::ReadKnownProcessPaths() {
+    SrwLockGuard lock(g_registryLock);
     if (!EnsureRegistryScaffold()) {
         return {};
     }
@@ -450,16 +452,17 @@ std::vector<ProcessPathEntry> ConfigReader::ReadKnownProcessPaths() {
         return {};
     }
 
-    // Query key metadata first so we can pre-size our scratch buffers.
     DWORD valueCount       = 0;
     DWORD maxValueNameLen  = 0;
     DWORD maxValueLen      = 0;
     RegQueryInfoKeyW(hKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                      &valueCount, &maxValueNameLen, &maxValueLen, nullptr, nullptr);
 
-    std::vector<ProcessPathEntry> entries;
-    std::vector<wchar_t> valueNameBuffer(maxValueNameLen + 2, L'\0');
-    std::vector<BYTE>    valueDataBuffer(maxValueLen + sizeof(wchar_t), 0);
+    Vector<ProcessPathEntry> entries;
+    Vector<wchar_t> valueNameBuffer;
+    valueNameBuffer.resize(maxValueNameLen + 2, L'\0');
+    Vector<BYTE> valueDataBuffer;
+    valueDataBuffer.resize(maxValueLen + sizeof(wchar_t), 0);
 
     for (DWORD index = 0; index < valueCount; ++index) {
         DWORD valueNameLen = maxValueNameLen + 1;
@@ -472,15 +475,14 @@ std::vector<ProcessPathEntry> ConfigReader::ReadKnownProcessPaths() {
             nullptr, &type,
             valueDataBuffer.data(), &valueDataLen);
 
-        // Skip malformed entries: wrong type, empty name, or empty value.
         if (enumStatus != ERROR_SUCCESS || type != REG_SZ ||
             valueNameLen == 0 || valueDataLen < sizeof(wchar_t)) {
             continue;
         }
 
-        const std::wstring processName = StripExeExtension(
-            std::wstring(valueNameBuffer.data(), valueNameLen));
-        const std::wstring fullPath    = TrimWhitespace(
+        const WString processName = StripExeExtension(
+            WString(valueNameBuffer.data(), valueNameLen));
+        const WString fullPath    = TrimWhitespace(
             reinterpret_cast<const wchar_t*>(valueDataBuffer.data()));
 
         if (!processName.empty() && !fullPath.empty()) {
@@ -493,16 +495,14 @@ std::vector<ProcessPathEntry> ConfigReader::ReadKnownProcessPaths() {
 }
 
 // Stores or updates the full path for a process.
-// Called by FindProcesses every time a process is seen running, so the stored
-// path stays current after reinstalls or moves.
-bool ConfigReader::WriteProcessPath(const std::wstring& processName, const std::wstring& fullPath) {
-    const std::wstring valueName  = NormalizePathValueName(processName);
-    const std::wstring trimmedPath = TrimWhitespace(fullPath);
+bool ConfigReader::WriteProcessPath(const WString& processName, const WString& fullPath) {
+    const WString valueName  = NormalizePathValueName(processName);
+    const WString trimmedPath = TrimWhitespace(fullPath);
     if (valueName.empty() || trimmedPath.empty()) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(g_registryMutex);
+    SrwLockGuard lock(g_registryLock);
     if (!EnsureRegistryScaffold()) {
         return false;
     }
@@ -511,28 +511,27 @@ bool ConfigReader::WriteProcessPath(const std::wstring& processName, const std::
 }
 
 // Prepends a new entry to the history ring buffer, capping at kMaxHistoryEntries.
-// Old entries are dropped from the tail.  An empty action or process name is
-// rejected so the log stays meaningful.
-bool ConfigReader::RecordHistory(const std::wstring& action,
-                                 const std::wstring& processName,
-                                 const std::wstring& fullPath) {
-    const std::wstring trimmedAction = TrimWhitespace(action);
-    const std::wstring trimmedName   = StripExeExtension(processName);
+bool ConfigReader::RecordHistory(const WString& action,
+                                 const WString& processName,
+                                 const WString& fullPath) {
+    const WString trimmedAction = TrimWhitespace(action);
+    const WString trimmedName   = StripExeExtension(processName);
     if (trimmedAction.empty() || trimmedName.empty()) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(g_registryMutex);
+    SrwLockGuard lock(g_registryLock);
     if (!EnsureRegistryScaffold()) {
         return false;
     }
 
     auto entries = ReadMultiStringValue(kHistoryKey, kHistoryValue);
-    // Insert at front so the most recent entry is always entries[0].
-    entries.insert(entries.begin(), BuildHistoryEntry(trimmedAction, trimmedName, fullPath));
-    if (entries.size() > kMaxHistoryEntries) {
-        entries.resize(kMaxHistoryEntries);
+    Vector<WString> newEntries;
+    newEntries.reserve(entries.size() + 1);
+    newEntries.push_back(BuildHistoryEntry(trimmedAction, trimmedName, fullPath));
+    for (size_t i = 0; i < entries.size() && newEntries.size() < kMaxHistoryEntries; ++i) {
+        newEntries.push_back(std::move(entries[i]));
     }
 
-    return WriteMultiStringValue(kHistoryKey, kHistoryValue, entries);
+    return WriteMultiStringValue(kHistoryKey, kHistoryValue, newEntries);
 }
