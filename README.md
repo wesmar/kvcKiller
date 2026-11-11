@@ -29,7 +29,7 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 ---
 
-## What's New - 10.11.2026 (v2.0.5)
+## What's New - 11.11.2026 (v2.0.5)
 
 The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture, a 1/70 static detection profile on VirusTotal at the time of publication, and a triple MASM x64 Macro Assembler pipeline, eliminating static binary signatures and readable strings across executable sections:
 
