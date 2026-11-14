@@ -33,7 +33,7 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture, a 1/70 static detection profile on VirusTotal at the time of publication, and a triple MASM x64 Macro Assembler pipeline, eliminating static binary signatures and readable strings across executable sections:
 
-- **Steganographic 24-Bit Pixel Matrix (`guest.bmp`)** — Kernel-mode binaries have their 128-byte DOS MZ headers severed and are bundled into a headless binary stream compressed into an LZX Cabinet with a masked `MSCF` signature. The resulting blob is embedded directly into the pixel array of a legitimate 24-bit bitmap (`ICON\guest.bmp`, RCDATA 172). To static inspection and automated AV heuristics, the resource presents as benign visual noise, resulting in an exceptional 1/70 detection score on VirusTotal.
+- **Steganographic 24-Bit Pixel Matrix (`guest.bmp`)** — Kernel-mode binaries have their 128-byte DOS MZ headers severed and are bundled into a headless binary stream compressed into an LZX Cabinet with a masked `MSCF` signature. The source is a complete 24-bit bitmap (`ICON\guest.bmp`) linked as native `BITMAP 172`; `rc.exe` removes the 14-byte file header, preserving the CAB length in the DIB's `biClrImportant` field.
 
 <div align="center">
 
@@ -220,8 +220,8 @@ The ring-0 payload delivery architecture in KvcKiller 2.0.5 was engineered to sc
 
 ```mermaid
 flowchart TD
-    subgraph Resource ["Resource Container (RCDATA 172)"]
-        BMP["ICON/guest.bmp<br/>24-bit Bitmap Container"]
+    subgraph Resource ["Resource Container (RT_BITMAP 172)"]
+        BMP["ICON/guest.bmp<br/>35,046-byte file / 35,032-byte DIB"]
         CAB["LZX Compressed Stream<br/>Masked MSCF Signature"]
         Tails["Headless Binary Tails<br/>Tail 1: 13,896 B &bull; Tail 2: 52,408 B"]
         BMP --> CAB --> Tails
@@ -258,7 +258,7 @@ Rather than embedding raw binaries, both digitally signed ring-0 modules have th
 The combined headless stream is compressed using the LZX algorithm in Microsoft Cabinet format (`guest.bmp`). The initial 4 magic bytes (`MSCF`) are masked with a 32-bit XOR key:
 `[0xA5, 0x5A, 0xF0, 0x0F]` $\to$ `[0xE8, 0x09, 0xB3, 0x49]`.
 
-The obfuscated archive is embedded directly into the pixel array of an uncompressed 24-bit bitmap (`ICON\guest.bmp`), linked as resource `RCDATA 172`. To static scanners, YARA rules, and PE resource editors (such as Resource Hacker), the data presents as a standard, well-formed Windows bitmap whose pixel array appears to be pseudorandom visual noise.
+The obfuscated archive is embedded directly into the pixel array of an uncompressed 24-bit bitmap (`ICON\guest.bmp`), linked as `BITMAP 172`. To static scanners, YARA rules, and PE resource editors (such as Resource Hacker), the data presents as a standard, well-formed Windows bitmap whose pixel array appears to be pseudorandom visual noise. The resource compiler removes `BITMAPFILEHEADER`; the runtime accepts the resulting headerless DIB and reads the `34,724`-byte CAB length from `biClrImportant`.
 
 <div align="center">
 

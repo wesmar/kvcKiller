@@ -28,7 +28,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
 MAIN_ICON            ICON                    "..\\ICON\\kvc.ico"
-IDR_GUEST_IMAGE      RCDATA                  "..\\ICON\\guest.bmp"
+IDR_GUEST_IMAGE      BITMAP                  "..\\ICON\\guest.bmp"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 2,0,5,0

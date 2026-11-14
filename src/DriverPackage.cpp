@@ -269,11 +269,11 @@ INT_PTR DIAMONDAPI FdiNotify(FDINOTIFICATIONTYPE type, PFDINOTIFICATION notifica
 bool ExtractDriverPackage(Vector<DriverPackageFile>& files) {
     files.clear();
 
-    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_GUEST_IMAGE), RT_RCDATA);
+    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_GUEST_IMAGE), RT_BITMAP);
     if (!resource) return false;
 
     const DWORD resourceSize = SizeofResource(nullptr, resource);
-    if (resourceSize < 54 + 4) return false;
+    if (resourceSize < 40 + 4) return false;
 
     HGLOBAL loaded = LoadResource(nullptr, resource);
     if (!loaded) return false;
@@ -281,15 +281,24 @@ bool ExtractDriverPackage(Vector<DriverPackageFile>& files) {
     const BYTE* raw = static_cast<const BYTE*>(LockResource(loaded));
     if (!raw) return false;
 
-    // Validate BMP header: 'BM'
-    if (raw[0] != 0x42 || raw[1] != 0x4D) return false;
+    DWORD cabSize = 0;
+    size_t offBits = 0;
+    if (resourceSize >= 54 && raw[0] == 0x42 && raw[1] == 0x4D) {
+        cabSize = *reinterpret_cast<const DWORD*>(raw + 6);
+        offBits = *reinterpret_cast<const DWORD*>(raw + 10);
+    } else {
+        const DWORD dibSize = *reinterpret_cast<const DWORD*>(raw);
+        const WORD bitsPerPixel = *reinterpret_cast<const WORD*>(raw + 14);
+        const DWORD colorsUsed = *reinterpret_cast<const DWORD*>(raw + 32);
+        cabSize = *reinterpret_cast<const DWORD*>(raw + 36);  // biClrImportant
+        if (dibSize < 40 || dibSize > resourceSize || bitsPerPixel != 24 ||
+            colorsUsed > (resourceSize - dibSize) / 4) {
+            return false;
+        }
+        offBits = static_cast<size_t>(dibSize) + static_cast<size_t>(colorsUsed) * 4;
+    }
 
-    // In guest.bmp, the CAB stream size is stored in bfReserved1 + bfReserved2 (offset 0x06)
-    const DWORD cabSize = *reinterpret_cast<const DWORD*>(raw + 6);
-    // Pixel offset is stored in bfOffBits (offset 0x0A, typically 54)
-    const DWORD offBits = *reinterpret_cast<const DWORD*>(raw + 10);
-
-    if (offBits >= resourceSize || cabSize == 0 || (offBits + cabSize) > resourceSize) {
+    if (offBits >= resourceSize || cabSize == 0 || cabSize > resourceSize - offBits) {
         return false;
     }
 
