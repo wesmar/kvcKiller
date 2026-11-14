@@ -31,8 +31,8 @@ MAIN_ICON            ICON                    "..\\ICON\\kvc.ico"
 IDR_GUEST_IMAGE      BITMAP                  "..\\ICON\\guest.bmp"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,0,6,0
- PRODUCTVERSION 2,0,6,0
+ FILEVERSION 2,0,5,0
+ PRODUCTVERSION 2,0,5,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -49,12 +49,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "wesmar (Marek Wesołowski)"
             VALUE "FileDescription", "KvcKiller - Advanced Process Management Tool"
-            VALUE "FileVersion", "2.0.6.0"
+            VALUE "FileVersion", "2.0.5.0"
             VALUE "InternalName", "KvcKiller.exe"
             VALUE "LegalCopyright", "Marek Wesołowski © 2026"
             VALUE "OriginalFilename", "KvcKiller.exe"
             VALUE "ProductName", "KvcKiller"
-            VALUE "ProductVersion", "2.0.6.0"
+            VALUE "ProductVersion", "2.0.5.0"
         END
     END
     BLOCK "VarFileInfo"
