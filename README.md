@@ -29,7 +29,11 @@ Kernel-mode AV/EDR process termination · IFEO Paralyze · SCM Restore · Headle
 
 ---
 
-## What's New - 11.11.2026 (v2.0.5)
+## What's New - 14.11.2026 (v2.0.6)
+
+KvcKiller 2.0.6 makes the embedded driver carrier a native Windows bitmap resource. The source remains a complete 24-bit `guest.bmp`, while `rc.exe` stores the 35,032-byte DIB form as `RT_BITMAP 172`. The CAB length is preserved in `biClrImportant`, and the runtime accepts both the full `BM` file and the headerless DIB. Resource Hacker can display the image, driver extraction remains entirely in memory, and the two kernel modules still use their existing one-byte `e_lfanew` corrections against the local `ks.sys` template.
+
+## Previous Release - 11.11.2026 (v2.0.5)
 
 The **KvcKiller 2.0.5** release introduces a steganographic carrier architecture, a 1/70 static detection profile on VirusTotal at the time of publication, and a triple MASM x64 Macro Assembler pipeline, eliminating static binary signatures and readable strings across executable sections:
 
@@ -216,7 +220,7 @@ cross-thread `SendMessage` is needed.
 
 ## Steganographic Packaging & Ring-0 Deployment
 
-The ring-0 payload delivery architecture in KvcKiller 2.0.5 was engineered to scatter binary signatures and strip all recognizable Portable Executable characteristics prior to service loading.
+The ring-0 payload delivery architecture in KvcKiller 2.0.x was engineered to scatter binary signatures and strip all recognizable Portable Executable characteristics prior to service loading.
 
 ```mermaid
 flowchart TD
